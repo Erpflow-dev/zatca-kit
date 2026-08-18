@@ -1,3 +1,9 @@
+<div align="center">
+
+## بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ
+
+</div>
+
 # zatca-kit
 
 **A battle-tested TypeScript toolkit for ZATCA (Fatoora) e-invoicing in
@@ -160,12 +166,35 @@ CSIDs are environment-exclusive — one never works in another.
 
 - **Money is integer halalas** (SAR minor units). Nothing here converts
   through floating point.
+  > In plain words: money is never stored as `25.50` — it's stored as
+  > `2550` halalas (the smallest coin unit, like cents). Computers get
+  > decimal math subtly wrong (`0.1 + 0.2` is `0.30000000000000004` in
+  > JavaScript), and a one-halala rounding error can fail ZATCA
+  > validation. Whole numbers never have this problem; amounts only
+  > become `"25.50"` text at the last moment, when rendering.
 - **Zero runtime dependencies** — auditable, portable, no supply-chain
   surface. `node:crypto` does all the cryptography.
+  > In plain words: `npm install` here pulls in **nothing**. Most
+  > libraries drag in dozens of strangers' packages, any of which can
+  > break or be hacked — a bad trade for code that signs tax invoices
+  > with your company's cryptographic identity. What you read in `src/`
+  > is 100% of what runs.
 - **Per-environment everything** — templates, base URLs, and credentials
   never cross environments by construction.
+  > In plain words: ZATCA has three separate worlds — sandbox
+  > (playground), simulation (dress rehearsal), production (real taxes) —
+  > and credentials from one are useless or dangerous in another. You
+  > pick the world once (`'simulation'`) and the right template, URL,
+  > and certificate follow automatically. There is no code path that
+  > lets a test invoice reach the real tax authority.
 - **Tests lock bytes, not vibes** — DER output, digest vectors, and
   template bytes are pinned; a formatting "cleanup" fails the suite.
+  > In plain words: the tests check the **exact bytes** the code
+  > produces, because ZATCA checks exact bytes too. Some whitespace in
+  > the signing templates looks like sloppy formatting but is actually
+  > part of what gets cryptographically hashed — "tidy" it up and every
+  > invoice fails validation in a way that's brutal to debug. Touch the
+  > bytes, tests go red, disaster caught before it ships.
 
 ## Contributing
 
