@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    name: Typecheck + unit tests (client, CSR)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  zatca-golden:
+    name: ZATCA SDK golden-file validation
+    runs-on: ubuntu-latest
+    # continue-on-error on THIS JOB ONLY: the SDK asset download can flake;
+    # a download failure must never block merges. The unit job stays required.
+    continue-on-error: true
+    env:
+      # The SDK zip is mirrored as a release asset on THIS repo (same tag)
+      # because ZATCA's SharePoint rejects headless curl. Re-mirror from
+      # sandbox.zatca.gov.sa when ZATCA ships a new SDK.
+      SDK_RELEASE_TAG: zatca-sdk-238-R3.3.8
+    steps:
+      - uses: actions/checkout@v4
+      # Java 11 EXACTLY, not 17+: JDK 15 removed secp256k1 from SunEC, and on
+      # any newer JRE the SDK's signature validation dies with "Curve not
+      # supported: secp256k1" while everything else passes — a silent hole in
+      # the golden gate. Do not "upgrade" this.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+      - name: Cache SDK zip
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: zatca-sdk.zip
+          key: ${{ env.SDK_RELEASE_TAG }}
+      - name: Download SDK zip (release asset)
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$SDK_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'zatca-sdk-toolbox.zip' \
+            --output zatca-sdk.zip
+      - name: Unzip SDK and locate the fatoora CLI
+        run: |
+          unzip -q zatca-sdk.zip -d sdk
+          FATOORA_DIR=$(dirname "$(find sdk -type f -name fatoora | head -1)")
+          chmod +x "$FATOORA_DIR/fatoora"
+          echo "FATOORA_HOME=$(cd "$FATOORA_DIR" && pwd)" >> "$GITHUB_ENV"
+          # Without SDK_CONFIG the jar reads Configuration/config.json, whose
+          # paths are hardcoded to C:\SDK\... — on Linux it then feeds the
+          # Apps/ DIRECTORY to the XML parser and every validation fails with
+          # "Content is not allowed in prolog". defaults.json is the
+          # relative-path variant intended for this.
+          echo "SDK_CONFIG=$(cd "$FATOORA_DIR/../Configuration" && pwd)/defaults.json" >> "$GITHUB_ENV"
+      - name: Toolchain smoke check — SDK's own samples must validate clean
+        run: |
+          cd "$FATOORA_HOME"
+          ./fatoora -validate -invoice "../Data/Samples/Simplified/Invoice/Simplified_Invoice.xml"
+          ./fatoora -validate -invoice "../Data/Samples/Simplified/Credit/Simplified_Credit_Note.xml"
+      - name: Validate golden fixtures (XSD/EN/KSA/PIH must pass)
+        run: |
+          cd "$FATOORA_HOME"
+          for f in "$GITHUB_WORKSPACE"/fixtures/*.xml; do
+            echo "=== validating $f"
+            # Unsigned pure-form fixtures: QR + SIGNATURE categories fail by
+            # design (fixtures/README.md), so the gate is the four categories
+            # an XML-builder regression breaks.
+            out=$(./fatoora -validate -invoice "$f" 2>&1) || true
+            echo "$out"
+            for check in XSD EN KSA PIH; do
+              if ! echo "$out" | grep -q "\[$check\] validation result : PASSED"; then
+                echo "::error::$check validation failed for $f"
+                exit 1
+              fi
+            done
+          done
