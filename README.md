@@ -105,6 +105,24 @@ const ublExtension = buildXadesExtension({
 // cert.signatureBytes per BR-KSA-27.
 ```
 
+## Which stack can use this?
+
+The code is **TypeScript on Node.js** — but the knowledge transfers to
+any stack, and the byte-locked test vectors make porting safe.
+
+| Your stack | How you use zatca-kit |
+|---|---|
+| **Node.js / TypeScript / JavaScript** (NestJS, Express, Fastify, Next.js API routes) | Directly — drop `src/` in and import. Needs Node ≥ 20 (`node:crypto` with secp256k1). |
+| **Bun / Deno** | The crypto primitives (secp256k1 ECDSA, SHA-256, DER) are standard; run the test suite first — 50 green tests means your runtime is compatible. |
+| **Electron / Tauri (Node side)** | Same as Node.js — sign on the main process, never in the renderer. |
+| **Flutter / Dart, Python, Go, Java, PHP, .NET, Rust** | Port the algorithms using this repo as the **reference implementation**: every digest, DER structure, and template is pinned by exact test vectors in `src/*.spec.ts`, so you can verify your port byte-for-byte. (A Dart port of the CSR + XAdES modules already exists and passes ZATCA's official SDK validation.) |
+| **ERPNext / Odoo / existing ERPs** | Use `docs/zatca-contract.md` + the traps list as the integration manual — the API contract and failure modes are stack-independent. |
+| **Browsers / frontend-only apps** | ❌ Not supported by design: ZATCA's `/compliance/invoices` blocks browser CORS preflights, and a signing private key must never live in a browser. Sign server-side or on-device. |
+
+**Rule of thumb:** if you write JS/TS, use the code. If you write
+anything else, use the vectors and the docs — they're the part that
+took weeks to get right.
+
 ## The three environments
 
 | env | base URL suffix | CSR template | OTP source |
@@ -213,4 +231,12 @@ documents observed behavior of the live service at the dates noted in
 
 ## License
 
-[MIT](./LICENSE)
+[AGPL-3.0](./LICENSE) — the same license used by other open-source ZATCA
+compliance projects in the ecosystem.
+
+> In plain words: you can use, modify, and even sell software built on
+> this kit for free — but if you run a modified version as a service
+> (SaaS, API, hosted product), you must offer your users the source code
+> of your modifications. Improvements flow back to the community instead
+> of disappearing behind a server. Using the kit **unmodified** inside
+> your product carries the same share-alike terms for the covered code.
