@@ -82,6 +82,24 @@ describe('buildPhase1Qr', () => {
     expect(decodeTlv(b64).get(1)?.toString('utf8')).toBe(name);
   });
 
+  it('rejects a payload past ZATCA\'s 700-char QR ceiling', () => {
+    // 200 ASCII chars fit one TLV byte length but push the base64 QR past
+    // 700 — structurally valid, compliance-invalid, so the builder throws.
+    expect(() =>
+      buildPhase2Qr({
+        sellerName: 'S'.repeat(200),
+        vatNumber: '310122393500003',
+        timestamp: new Date(Date.UTC(2022, 3, 25, 15, 30)),
+        totalWithVatHalalas: 100000,
+        vatHalalas: 15000,
+        invoiceHashBase64: 'a'.repeat(44),
+        signatureBase64: 'b'.repeat(96),
+        publicKeyBytes: new Uint8Array(88),
+        certificateSignature: new Uint8Array(72),
+      }),
+    ).toThrow(RangeError);
+  });
+
   it('rejects a seller name whose UTF-8 exceeds one TLV byte length', () => {
     expect(() =>
       buildPhase1Qr({

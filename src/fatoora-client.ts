@@ -13,10 +13,17 @@ export interface ReportOutcome {
   /**
    * The invoice itself was rejected — retrying the same XML is pointless.
    * ONLY 400 qualifies. 401/406 are our credentials/headers being wrong, and
-   * 409 means ZATCA already has it; neither says anything about the invoice,
-   * so neither may burn it to 'failed' (docs/10 status-code table).
+   * a duplicate means ZATCA already has it; neither says anything about the
+   * invoice, so neither may burn it to 'failed' (docs/10 status-code table).
    */
   rejected: boolean;
+  /**
+   * ZATCA already holds this invoice (crash-safe retry replay). The spec
+   * documented 208 for this; the LIVE service moved to 409 (production
+   * integrators track the same migration) — both map here. Success, but
+   * THIS response carries no fresh payload.
+   */
+  duplicate: boolean;
   status: number;
   body: string;
 }
@@ -46,6 +53,13 @@ export interface ClearanceOutcome {
   ok: boolean;
   /** 400 — ZATCA rejected THIS invoice; retrying the same XML is pointless. */
   rejected: boolean;
+  /**
+   * Already cleared earlier (208 per spec, 409 on the live service). ok
+   * stays true BUT clearedInvoiceBase64 is null — the legal stamped copy
+   * came with the FIRST response; callers must use their archived one,
+   * never treat this reply as carrying it.
+   */
+  duplicate: boolean;
   status: number;
   /** CLEARED / NOT_CLEARED. */
   clearanceStatus: string | null;
@@ -129,10 +143,13 @@ export class FatooraClient {
     // path produces it whenever the connection dies after ZATCA committed the
     // report, so it is a SUCCESS — the invoice is filed. Counting it as a
     // rejection would mark a compliant invoice 'failed' and alert on it.
-    const alreadyReported = res.status === 409;
+    // (208 was the spec's duplicate code before the live service moved to
+    // 409 — accept both, flagged so callers can tell replay from first.)
+    const duplicate = res.status === 208 || res.status === 409;
     return {
-      ok: (res.status >= 200 && res.status < 300) || alreadyReported,
+      ok: (res.status >= 200 && res.status < 300) || duplicate,
       rejected: res.status === 400,
+      duplicate,
       status: res.status,
       body: res.body,
     };
@@ -164,17 +181,21 @@ export class FatooraClient {
       },
       body: JSON.stringify({ invoiceHash, uuid, invoice: invoiceXmlBase64 }),
     });
-    // 409 mirrors reporting: "already cleared earlier" after a dead
-    // connection on our crash-safe retry — a success without a fresh
-    // clearedInvoice copy (the first response carried it).
-    const alreadyCleared = res.status === 409;
+    // Duplicate submission: the spec documents 208, the live service now
+    // sends 409 (the same 208→409 migration production integrators log).
+    // A duplicate is a success — the invoice WAS cleared — but this
+    // response has no clearedInvoice: the caller's archived copy from the
+    // first submission is the legal document, and `duplicate` makes that
+    // impossible to miss.
+    const duplicate = res.status === 208 || res.status === 409;
     const parsed = this.tryJson<{
       clearanceStatus?: string;
       clearedInvoice?: string;
     }>(res.body);
     return {
-      ok: (res.status >= 200 && res.status < 300) || alreadyCleared,
+      ok: (res.status >= 200 && res.status < 300) || duplicate,
       rejected: res.status === 400,
+      duplicate,
       status: res.status,
       clearanceStatus: parsed?.clearanceStatus ?? null,
       clearedInvoiceBase64: parsed?.clearedInvoice ?? null,

@@ -133,6 +133,10 @@ describe('generateCsr', () => {
     ['organizationIdentifier not starting with 3', { organizationIdentifier: '199999999900003' }],
     ['invoiceType all zeros', { invoiceType: '0000' }],
     ['invoiceType wrong alphabet', { invoiceType: '12a0' }],
+    // TSCZ last two positions are RESERVED zeros — '0111'/'1010' etc.
+    // produce CSRs ZATCA can reject at onboarding.
+    ['invoiceType reserved digit set', { invoiceType: '0111' }],
+    ['invoiceType reserved digit set 2', { invoiceType: '1010' }],
     ['serialNumber missing the 1-|2-|3- shape', { serialNumber: 'PAX-A920' }],
     ['countryName not ISO2', { countryName: 'KSA' }],
     ['empty required field', { organizationName: '' }],

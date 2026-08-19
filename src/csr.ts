@@ -149,9 +149,13 @@ export function validateCsrConfig(config: CsrConfig): void {
       'organizationIdentifier must be a 15-digit VAT number starting and ending with 3',
     );
   }
-  if (!/^[01]{4}$/.test(config.invoiceType) || config.invoiceType === '0000') {
+  // TSCZ functionality map: T=standard(B2B), S=simplified(B2C); the last
+  // two positions are RESERVED and must stay '00' — ZATCA's technical
+  // guideline defines only 1000/0100/1100 as valid today, and a CSR with
+  // anything else risks rejection at onboarding.
+  if (!/^(10|01|11)00$/.test(config.invoiceType)) {
     throw new CsrConfigError(
-      "invoiceType must be a 4-char TSCZ map like '1100' or '0100', not all zeros",
+      "invoiceType must be '1000' (standard), '0100' (simplified) or '1100' (both) — last two digits are reserved zeros",
     );
   }
   if (!/^[A-Z]{2}$/.test(config.countryName)) {

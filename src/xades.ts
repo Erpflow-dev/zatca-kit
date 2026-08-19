@@ -14,7 +14,7 @@
  *   encoding, same as the certificate hash).
  * Do not reformat either template.
  */
-import { createHash, createSign } from 'node:crypto';
+import { X509Certificate, createHash, createSign } from 'node:crypto';
 
 export interface CertificateInfo {
   /** The bare base64-DER text (goes verbatim into ds:X509Certificate). */
@@ -24,7 +24,12 @@ export interface CertificateInfo {
   /** RFC 2253 order, e.g. "CN=eInvoicing". */
   issuerName: string;
   serialDecimal: string;
-  /** Raw uncompressed SEC1 point (QR tag 8). */
+  /**
+   * FULL DER SubjectPublicKeyInfo (88 bytes for secp256k1) — what QR
+   * tag 8 requires. NOT the bare 65-byte EC point: the reference
+   * implementations that pass ZATCA validation all embed the complete
+   * SPKI structure (30 56 30 10 … 03 42 00 04‖X‖Y).
+   */
   publicKeyBytes: Buffer;
   /** The CA's DER ECDSA signature over the cert (QR tag 9). */
   signatureBytes: Buffer;
@@ -114,8 +119,13 @@ export function parseCertificate(base64Der: string): CertificateInfo {
     ).toString('base64'),
     issuerName: rdns.reverse().join(', '),
     serialDecimal: serial,
-    // BIT STRING: first content byte is the unused-bits count.
-    publicKeyBytes: Buffer.from(spkBits.value.subarray(1)),
+    // QR tag 8 wants the COMPLETE SubjectPublicKeyInfo DER (88 bytes),
+    // not the bare point inside its BIT STRING — node:crypto re-emits
+    // the canonical structure. (spkBits stays parsed above so a malformed
+    // SPKI still fails loudly here rather than downstream.)
+    publicKeyBytes: new X509Certificate(
+      `-----BEGIN CERTIFICATE-----\n${cleaned}\n-----END CERTIFICATE-----`,
+    ).publicKey.export({ type: 'spki', format: 'der' }) as Buffer,
     signatureBytes: Buffer.from(sigBits.value.subarray(1)),
   };
 }

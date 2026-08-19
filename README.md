@@ -187,6 +187,16 @@ CSIDs are environment-exclusive — one never works in another.
     Sneaky because per-field tests happily assert the wrong string —
     lock your builder against ZATCA's published sample base64, byte
     for byte, like `qr.spec.ts` does.
+16. **QR tag 8 is the FULL SubjectPublicKeyInfo DER (88 bytes), not the
+    bare 65-byte EC point.** Every X.509 parser hands you the tempting
+    raw `04‖X‖Y` from the BIT STRING; ZATCA's validation wants the whole
+    `3056 3010 06072a8648ce3d0201 06052b8104000a 034200 04‖X‖Y`
+    structure. Related caps: the encoded QR maxes out at 700 chars, and
+    the CSR invoice-type map allows only `1000`/`0100`/`1100` (last two
+    TSCZ digits are reserved zeros). Duplicate submissions: the spec
+    documents 208, the live service now sends 409 — treat both as
+    "already filed", and remember a duplicate clearance reply carries NO
+    clearedInvoice (your archived first response is the legal copy).
 
 ## Design principles
 

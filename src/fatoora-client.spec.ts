@@ -80,18 +80,23 @@ describe('FatooraClient.reportSimplified', () => {
     expect(out).toMatchObject({ ok: true, rejected: false });
   });
 
-  it('treats 409 as SUCCESS — ZATCA already has the invoice', async () => {
-    // Our crash-safe retry produces this whenever the connection died after
-    // ZATCA committed the report. Calling it a rejection would mark a
-    // compliant invoice 'failed' forever and raise a false alert.
-    stubFetch(409, 'Invoice was already Reported successfully earlier.');
-    const out = await new FatooraClient().reportSimplified({
-      creds,
-      ...invoice,
-    });
-    expect(out.ok).toBe(true);
-    expect(out.rejected).toBe(false);
-  });
+  it.each([409, 208])(
+    'treats %i as duplicate-SUCCESS — ZATCA already has the invoice',
+    async (status) => {
+      // Our crash-safe retry produces this whenever the connection died
+      // after ZATCA committed the report (spec documented 208; the live
+      // service moved to 409 — both count). Calling it a rejection would
+      // mark a compliant invoice 'failed' forever and raise a false alert.
+      stubFetch(status, 'Invoice was already Reported successfully earlier.');
+      const out = await new FatooraClient().reportSimplified({
+        creds,
+        ...invoice,
+      });
+      expect(out.ok).toBe(true);
+      expect(out.rejected).toBe(false);
+      expect(out.duplicate).toBe(true);
+    },
+  );
 
   it('rejects ONLY on 400 — the one code that blames the invoice', async () => {
     stubFetch(400, 'bad xml');
@@ -288,4 +293,39 @@ describe('FatooraClient onboarding endpoints', () => {
     expect(out.ok).toBe(true);
     expect(out.validationResults?.erroMessages).toEqual([]);
   });
+
+  it('clearStandard: 200 carries the legal clearedInvoice, not a duplicate', async () => {
+    stub(
+      200,
+      JSON.stringify({ clearanceStatus: 'CLEARED', clearedInvoice: 'UEsF' }),
+    );
+    const out = await new FatooraClient().clearStandard({
+      creds,
+      invoiceHash: invoice.invoiceHash,
+      uuid: invoice.uuid,
+      invoiceXmlBase64: invoice.invoiceXmlBase64,
+    });
+    expect(out.ok).toBe(true);
+    expect(out.duplicate).toBe(false);
+    expect(out.clearedInvoiceBase64).toBe('UEsF');
+  });
+
+  it.each([208, 409])(
+    'clearStandard: %i is duplicate-success WITHOUT a clearedInvoice',
+    async (status) => {
+      // Spec documented 208 for replays; the live service moved to 409.
+      // Either way the stamped XML came with the FIRST response — this
+      // reply must never be treated as carrying the legal copy.
+      stub(status, '{}');
+      const out = await new FatooraClient().clearStandard({
+        creds,
+        invoiceHash: invoice.invoiceHash,
+        uuid: invoice.uuid,
+        invoiceXmlBase64: invoice.invoiceXmlBase64,
+      });
+      expect(out.ok).toBe(true);
+      expect(out.duplicate).toBe(true);
+      expect(out.clearedInvoiceBase64).toBeNull();
+    },
+  );
 });

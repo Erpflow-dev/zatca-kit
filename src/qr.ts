@@ -36,7 +36,10 @@ export interface Phase2Fields extends Phase1Fields {
   invoiceHashBase64: string;
   /** base64 ECDSA signature over the invoice hash. */
   signatureBase64: string;
-  /** Raw secp256k1 public key bytes (uncompressed point). */
+  /**
+   * FULL DER SubjectPublicKeyInfo bytes (88 for secp256k1) — exactly what
+   * parseCertificate().publicKeyBytes returns. NOT the bare 65-byte point.
+   */
   publicKeyBytes: Uint8Array;
   /**
    * Raw ECDSA signature bytes from the CSID certificate — tag 9, required
@@ -88,15 +91,33 @@ function phase1Tlvs(f: Phase1Fields): Buffer[] {
   ];
 }
 
+/**
+ * ZATCA's ceiling on the whole encoded QR payload (technical guideline):
+ * past it the QR is structurally fine but non-compliant, so builders
+ * throw rather than hand back something a validator will reject.
+ */
+export const QR_MAX_CHARS = 700;
+
+function encodeQr(parts: Buffer[]): string {
+  const b64 = Buffer.concat(parts).toString('base64');
+  if (b64.length > QR_MAX_CHARS) {
+    throw new RangeError(
+      `QR payload is ${b64.length} base64 chars — ZATCA caps it at ${QR_MAX_CHARS}. ` +
+        'Shorten the seller name (tag 1 is the usual culprit).',
+    );
+  }
+  return b64;
+}
+
 /** Phase-1 (generation) QR payload — all a phase-1 tenant needs. */
 export function buildPhase1Qr(fields: Phase1Fields): string {
-  return Buffer.concat(phase1Tlvs(fields)).toString('base64');
+  return encodeQr(phase1Tlvs(fields));
 }
 
 /** Phase-2 (integration) QR payload — BR-KSA-27. Tag 9 rides only when
  * provided (simplified invoices); standard invoices omit it. */
 export function buildPhase2Qr(fields: Phase2Fields): string {
-  return Buffer.concat([
+  return encodeQr([
     ...phase1Tlvs(fields),
     tlv(6, utf8(fields.invoiceHashBase64)),
     tlv(7, utf8(fields.signatureBase64)),
@@ -104,5 +125,5 @@ export function buildPhase2Qr(fields: Phase2Fields): string {
     ...(fields.certificateSignature
       ? [tlv(9, fields.certificateSignature)]
       : []),
-  ]).toString('base64');
+  ]);
 }

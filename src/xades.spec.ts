@@ -47,9 +47,16 @@ describe('parseCertificate', () => {
     expect(cert.serialDecimal).toBe(CERT_SERIAL);
   });
 
-  it('public key is the raw uncompressed secp256k1 point (QR tag 8)', () => {
-    expect(cert.publicKeyBytes.length).toBe(65);
-    expect(cert.publicKeyBytes[0]).toBe(0x04);
+  it('public key is the FULL SubjectPublicKeyInfo DER (QR tag 8)', () => {
+    // 88 bytes for secp256k1: SEQUENCE(0x30 0x56) wrapping algorithm ids
+    // and the BIT STRING that holds the raw 0x04‖X‖Y point. A previous
+    // version asserted the bare 65-byte point — the representation ZATCA
+    // QR validation rejects.
+    expect(cert.publicKeyBytes.length).toBe(88);
+    expect(cert.publicKeyBytes[0]).toBe(0x30);
+    expect(cert.publicKeyBytes[1]).toBe(0x56);
+    // The raw point rides INSIDE the structure (tail 65 bytes).
+    expect(cert.publicKeyBytes[88 - 65]).toBe(0x04);
   });
 
   it('certificate signature bytes are DER ECDSA (QR tag 9)', () => {
