@@ -179,6 +179,14 @@ CSIDs are environment-exclusive — one never works in another.
 14. **Simulation enforces the compliance-check gate that sandbox skips**
     (`Missing-ComplianceSteps` names exactly which document types are
     missing — one per type declared in your CSR's invoice-type map).
+15. **QR tag 3 takes seconds precision — `2022-04-25T15:30:00Z`, no
+    milliseconds.** `Date.toISOString()` (JS) and `toIso8601String()`
+    (Dart) both emit `.000Z`, which diverges from ZATCA's published
+    sample AND can never equal the invoice XML's `cbc:IssueTime`
+    (HH:MM:SS) that Phase 2 validation cross-checks the QR against.
+    Sneaky because per-field tests happily assert the wrong string —
+    lock your builder against ZATCA's published sample base64, byte
+    for byte, like `qr.spec.ts` does.
 
 ## Design principles
 

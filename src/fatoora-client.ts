@@ -275,9 +275,20 @@ export class FatooraClient {
       clearanceStatus?: string;
       validationResults?: ComplianceCheckOutcome['validationResults'];
     }>(res.body);
+    // Trap 3 applies HERE too: failures can ride inside HTTP 200. `ok`
+    // demands a clean validation — no errorMessages (either spelling)
+    // and no NOT_REPORTED / NOT_CLEARED disposition.
+    const errors =
+      parsed?.validationResults?.errorMessages ??
+      parsed?.validationResults?.erroMessages ??
+      [];
+    const disposition = parsed?.reportingStatus ?? parsed?.clearanceStatus ?? '';
     return {
       status: res.status,
-      ok: res.status === 200 || res.status === 202,
+      ok:
+        (res.status === 200 || res.status === 202) &&
+        errors.length === 0 &&
+        !disposition.startsWith('NOT_'),
       reportingStatus: parsed?.reportingStatus ?? null,
       clearanceStatus: parsed?.clearanceStatus ?? null,
       validationResults: parsed?.validationResults ?? null,

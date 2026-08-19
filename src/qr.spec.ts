@@ -1,4 +1,9 @@
-import { buildPhase1Qr, buildPhase2Qr, halalasToSar } from './qr';
+import {
+  buildPhase1Qr,
+  buildPhase2Qr,
+  formatQrTimestamp,
+  halalasToSar,
+} from './qr';
 
 /**
  * Vectors mirror the Flutter till's zatca_qr_test.dart exactly — the two
@@ -20,6 +25,27 @@ function decodeTlv(b64: string): Map<number, Buffer> {
 }
 
 describe('buildPhase1Qr', () => {
+  /**
+   * ZATCA's published sample invoice from the QR specification. The
+   * expected base64 is the AUTHORITY's own encoding — full-string
+   * compare, so a formatting drift in ANY tag fails here. (A previous
+   * version of this suite asserted a milliseconds timestamp the spec
+   * never allowed; per-field assertions had enshrined the bug.)
+   */
+  it('byte-matches ZATCA\'s published sample QR', () => {
+    const b64 = buildPhase1Qr({
+      sellerName: 'Bobs Records',
+      vatNumber: '310122393500003',
+      timestamp: new Date(Date.UTC(2022, 3, 25, 15, 30)),
+      totalWithVatHalalas: 100000,
+      vatHalalas: 15000,
+    });
+    expect(b64).toBe(
+      'AQxCb2JzIFJlY29yZHMCDzMxMDEyMjM5MzUwMDAwMwMUMjAyMi0wNC0yNVQxNTozMD' +
+        'owMFoEBzEwMDAuMDAFBjE1MC4wMA==',
+    );
+  });
+
   it('golden: known invoice encodes to expected TLV structure', () => {
     const b64 = buildPhase1Qr({
       sellerName: 'Bobs Records',
@@ -31,10 +57,17 @@ describe('buildPhase1Qr', () => {
     const tags = decodeTlv(b64);
     expect(tags.get(1)?.toString('utf8')).toBe('Bobs Records');
     expect(tags.get(2)?.toString('utf8')).toBe('310122393500003');
-    expect(tags.get(3)?.toString('utf8')).toBe('2022-04-25T15:30:00.000Z');
+    // 20 bytes, seconds precision, NO milliseconds — the spec format.
+    expect(tags.get(3)?.toString('utf8')).toBe('2022-04-25T15:30:00Z');
     expect(tags.get(4)?.toString('utf8')).toBe('1000.00');
     expect(tags.get(5)?.toString('utf8')).toBe('150.00');
     expect(tags.size).toBe(5);
+  });
+
+  it('formatQrTimestamp strips milliseconds, keeps Z', () => {
+    expect(formatQrTimestamp(new Date('2022-04-25T15:30:00.123Z'))).toBe(
+      '2022-04-25T15:30:00Z',
+    );
   });
 
   it('Arabic seller name survives UTF-8 round trip', () => {
@@ -101,5 +134,21 @@ describe('buildPhase2Qr', () => {
     // …8-9: raw bytes, NOT base64 text (the documented asymmetry).
     expect([...(tags.get(8) ?? [])]).toEqual([...publicKeyBytes]);
     expect([...(tags.get(9) ?? [])]).toEqual([...certificateSignature]);
+  });
+
+  it('omits tag 9 when no certificate signature (standard invoices)', () => {
+    const b64 = buildPhase2Qr({
+      sellerName: 'Bobs Records',
+      vatNumber: '310122393500003',
+      timestamp: new Date(Date.UTC(2022, 3, 25, 15, 30)),
+      totalWithVatHalalas: 100000,
+      vatHalalas: 15000,
+      invoiceHashBase64: 'aGFzaA==',
+      signatureBase64: 'c2ln',
+      publicKeyBytes: Uint8Array.from([4, 1, 2, 3]),
+    });
+    const tags = decodeTlv(b64);
+    expect(tags.size).toBe(8);
+    expect(tags.has(9)).toBe(false);
   });
 });

@@ -38,8 +38,23 @@ export interface Phase2Fields extends Phase1Fields {
   signatureBase64: string;
   /** Raw secp256k1 public key bytes (uncompressed point). */
   publicKeyBytes: Uint8Array;
-  /** Raw ECDSA signature bytes from the CSID certificate. */
-  certificateSignature: Uint8Array;
+  /**
+   * Raw ECDSA signature bytes from the CSID certificate — tag 9, required
+   * on SIMPLIFIED (B2C) invoices only; omit for standard (B2B).
+   */
+  certificateSignature?: Uint8Array;
+}
+
+/**
+ * QR tag 3 timestamp: seconds precision, Z suffix, NO milliseconds —
+ * `2022-04-25T15:30:00Z`, exactly as ZATCA's published sample encodes it
+ * (tag 3, length 0x14 = 20 bytes). `Date.toISOString()` alone emits
+ * `.000Z`, which both diverges from the spec sample and can never equal
+ * the invoice XML's `cbc:IssueTime` (HH:MM:SS) that Phase 2 validation
+ * cross-checks the QR against. Same rule as xades.ts formatSigningTime.
+ */
+export function formatQrTimestamp(date: Date): string {
+  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 /** "2550" halalas → "25.50" (ZATCA wants decimal SAR with 2 places). */
@@ -67,7 +82,7 @@ function phase1Tlvs(f: Phase1Fields): Buffer[] {
   return [
     tlv(1, utf8(f.sellerName)),
     tlv(2, utf8(f.vatNumber)),
-    tlv(3, utf8(f.timestamp.toISOString())),
+    tlv(3, utf8(formatQrTimestamp(f.timestamp))),
     tlv(4, utf8(halalasToSar(f.totalWithVatHalalas))),
     tlv(5, utf8(halalasToSar(f.vatHalalas))),
   ];
@@ -78,13 +93,16 @@ export function buildPhase1Qr(fields: Phase1Fields): string {
   return Buffer.concat(phase1Tlvs(fields)).toString('base64');
 }
 
-/** Phase-2 (integration) QR payload — BR-KSA-27, simplified invoices. */
+/** Phase-2 (integration) QR payload — BR-KSA-27. Tag 9 rides only when
+ * provided (simplified invoices); standard invoices omit it. */
 export function buildPhase2Qr(fields: Phase2Fields): string {
   return Buffer.concat([
     ...phase1Tlvs(fields),
     tlv(6, utf8(fields.invoiceHashBase64)),
     tlv(7, utf8(fields.signatureBase64)),
     tlv(8, fields.publicKeyBytes),
-    tlv(9, fields.certificateSignature),
+    ...(fields.certificateSignature
+      ? [tlv(9, fields.certificateSignature)]
+      : []),
   ]).toString('base64');
 }
