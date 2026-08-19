@@ -149,29 +149,39 @@ export function formatSigningTime(date: Date): string {
   return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
-/** The EXACT bytes hashed for the SignedProperties reference digest. */
+/**
+ * The EXACT bytes hashed for the SignedProperties reference digest —
+ * reverse-engineered from SDK 3.3.8 and proven live 2026-08-19 (GLOBAL
+ * PASSED + clean simulation-gateway acceptance): the validator serializes
+ * the RENDERED node with a plain Java identity Transformer, which keeps
+ * the document's own indentation, adds `xmlns:ds` to every ds:-prefixed
+ * element, and self-closes the empty DigestMethod. So the hashed form is
+ * the rendered block + those serializer quirks — NOT a deeper-indented
+ * variant (that folklore only worked for implementations whose documents
+ * happen to render at the deeper indent).
+ */
 export function signedPropertiesForSigning(
   signingTime: string,
   cert: CertificateInfo,
 ): string {
   return (
     '<xades:SignedProperties xmlns:xades="http://uri.etsi.org/01903/v1.3.2#" Id="xadesSignedProperties">\n' +
-    '                                    <xades:SignedSignatureProperties>\n' +
-    `                                        <xades:SigningTime>${signingTime}</xades:SigningTime>\n` +
-    '                                        <xades:SigningCertificate>\n' +
-    '                                            <xades:Cert>\n' +
-    '                                                <xades:CertDigest>\n' +
-    '                                                    <ds:DigestMethod xmlns:ds="http://www.w3.org/2000/09/xmldsig#" Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>\n' +
-    `                                                    <ds:DigestValue xmlns:ds="http://www.w3.org/2000/09/xmldsig#">${cert.hashBase64}</ds:DigestValue>\n` +
-    '                                                </xades:CertDigest>\n' +
-    '                                                <xades:IssuerSerial>\n' +
-    `                                                    <ds:X509IssuerName xmlns:ds="http://www.w3.org/2000/09/xmldsig#">${cert.issuerName}</ds:X509IssuerName>\n` +
-    `                                                    <ds:X509SerialNumber xmlns:ds="http://www.w3.org/2000/09/xmldsig#">${cert.serialDecimal}</ds:X509SerialNumber>\n` +
-    '                                                </xades:IssuerSerial>\n' +
-    '                                            </xades:Cert>\n' +
-    '                                        </xades:SigningCertificate>\n' +
-    '                                    </xades:SignedSignatureProperties>\n' +
-    '                                </xades:SignedProperties>'
+    '                                <xades:SignedSignatureProperties>\n' +
+    `                                    <xades:SigningTime>${signingTime}</xades:SigningTime>\n` +
+    '                                    <xades:SigningCertificate>\n' +
+    '                                        <xades:Cert>\n' +
+    '                                            <xades:CertDigest>\n' +
+    '                                                <ds:DigestMethod xmlns:ds="http://www.w3.org/2000/09/xmldsig#" Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>\n' +
+    `                                                <ds:DigestValue xmlns:ds="http://www.w3.org/2000/09/xmldsig#">${cert.hashBase64}</ds:DigestValue>\n` +
+    '                                            </xades:CertDigest>\n' +
+    '                                            <xades:IssuerSerial>\n' +
+    `                                                <ds:X509IssuerName xmlns:ds="http://www.w3.org/2000/09/xmldsig#">${cert.issuerName}</ds:X509IssuerName>\n` +
+    `                                                <ds:X509SerialNumber xmlns:ds="http://www.w3.org/2000/09/xmldsig#">${cert.serialDecimal}</ds:X509SerialNumber>\n` +
+    '                                            </xades:IssuerSerial>\n' +
+    '                                        </xades:Cert>\n' +
+    '                                    </xades:SigningCertificate>\n' +
+    '                                </xades:SignedSignatureProperties>\n' +
+    '                            </xades:SignedProperties>'
   );
 }
 

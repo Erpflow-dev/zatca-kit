@@ -30,9 +30,12 @@ const CERT_HASH =
   'OWM5NDJmZjM3NWU0ZGUwMTEzMWI2NTMyYjE2ODMxOTIyZjhmNGJlODBiOGRkMGM2' +
   'NjlmMDNhYTMzYjE2ODE3NA==';
 const CERT_SERIAL = '506287770648388695579712932838298178911138492571';
+// Recomputed 2026-08-19 for the live-proven for-signing form (rendered
+// indentation + Java-serializer quirks); the previous vector locked the
+// deeper-indented folklore template that SDK validation rejects.
 const SIGNED_PROPS_HASH =
-  'NjMwNzEwZjBjZDUzMWQxNWM4ZjNhNmQyNmI4OTI3NWZiYzExN2M2NWU5ZWE5MWRh' +
-  'MDFjZDY5OWJkOWQ0ZDA2Ng==';
+  'ODA4MjdjYWNkZjNlMzVhNDY5Yzc4NjIyMWRlZTBjZmM1MWEwOGM3ZmM2Zjk4ODU2' +
+  'ZTQ4YmYxMzhmNDU3ZWQ1NA==';
 const SIGNING_TIME = '2026-01-01T00:00:00Z';
 
 describe('parseCertificate', () => {

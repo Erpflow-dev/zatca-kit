@@ -49,15 +49,16 @@ export interface Phase2Fields extends Phase1Fields {
 }
 
 /**
- * QR tag 3 timestamp: seconds precision, Z suffix, NO milliseconds —
- * `2022-04-25T15:30:00Z`, exactly as ZATCA's published sample encodes it
- * (tag 3, length 0x14 = 20 bytes). `Date.toISOString()` alone emits
- * `.000Z`, which both diverges from the spec sample and can never equal
- * the invoice XML's `cbc:IssueTime` (HH:MM:SS) that Phase 2 validation
- * cross-checks the QR against. Same rule as xades.ts formatSigningTime.
+ * QR tag 3 timestamp: `2022-04-25T15:30:00` — seconds precision, NO
+ * milliseconds, NO `Z`. Live-verified 2026-08-19 against the simulation
+ * gateway: the Phase-2 KSA-25 cross-check wants tag 3 byte-equal to
+ * `IssueDate + 'T' + IssueTime`, and a `Z` suffix draws
+ * `invoiceTimeStamp_QRCODE_INVALID`; ZATCA's own SDK emits no Z. Note
+ * the trap: ZATCA's PUBLISHED phase-1 sample carries a Z — the published
+ * sample and the live validator disagree, and the live validator wins.
  */
 export function formatQrTimestamp(date: Date): string {
-  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
+  return date.toISOString().replace(/\.\d{3}Z$/, '').replace(/Z$/, '');
 }
 
 /** "2550" halalas → "25.50" (ZATCA wants decimal SAR with 2 places). */

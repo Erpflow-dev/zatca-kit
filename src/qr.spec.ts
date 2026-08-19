@@ -26,13 +26,14 @@ function decodeTlv(b64: string): Map<number, Buffer> {
 
 describe('buildPhase1Qr', () => {
   /**
-   * ZATCA's published sample invoice from the QR specification. The
-   * expected base64 is the AUTHORITY's own encoding — full-string
-   * compare, so a formatting drift in ANY tag fails here. (A previous
-   * version of this suite asserted a milliseconds timestamp the spec
-   * never allowed; per-field assertions had enshrined the bug.)
+   * Full-QR byte lock in the LIVE-VERIFIED tag-3 format: seconds, no
+   * millis, NO Z (the phase-2 KSA-25 cross-check rejects a Z with
+   * invoiceTimeStamp_QRCODE_INVALID; ZATCA's own SDK emits none —
+   * proven against the live simulation gateway 2026-08-19). ZATCA's
+   * PUBLISHED phase-1 sample carries a Z; the live validator disagrees
+   * with the sample and wins. Fields otherwise mirror that sample.
    */
-  it('byte-matches ZATCA\'s published sample QR', () => {
+  it('byte-matches the live-verified sample QR encoding', () => {
     const b64 = buildPhase1Qr({
       sellerName: 'Bobs Records',
       vatNumber: '310122393500003',
@@ -41,8 +42,8 @@ describe('buildPhase1Qr', () => {
       vatHalalas: 15000,
     });
     expect(b64).toBe(
-      'AQxCb2JzIFJlY29yZHMCDzMxMDEyMjM5MzUwMDAwMwMUMjAyMi0wNC0yNVQxNTozMD' +
-        'owMFoEBzEwMDAuMDAFBjE1MC4wMA==',
+      'AQxCb2JzIFJlY29yZHMCDzMxMDEyMjM5MzUwMDAwMwMTMjAyMi0wNC0yNVQxNTozMD' +
+        'owMAQHMTAwMC4wMAUGMTUwLjAw',
     );
   });
 
@@ -57,16 +58,16 @@ describe('buildPhase1Qr', () => {
     const tags = decodeTlv(b64);
     expect(tags.get(1)?.toString('utf8')).toBe('Bobs Records');
     expect(tags.get(2)?.toString('utf8')).toBe('310122393500003');
-    // 20 bytes, seconds precision, NO milliseconds — the spec format.
-    expect(tags.get(3)?.toString('utf8')).toBe('2022-04-25T15:30:00Z');
+    // 19 bytes: seconds precision, no millis, NO Z (live KSA-25 form).
+    expect(tags.get(3)?.toString('utf8')).toBe('2022-04-25T15:30:00');
     expect(tags.get(4)?.toString('utf8')).toBe('1000.00');
     expect(tags.get(5)?.toString('utf8')).toBe('150.00');
     expect(tags.size).toBe(5);
   });
 
-  it('formatQrTimestamp strips milliseconds, keeps Z', () => {
+  it('formatQrTimestamp strips milliseconds AND the Z', () => {
     expect(formatQrTimestamp(new Date('2022-04-25T15:30:00.123Z'))).toBe(
-      '2022-04-25T15:30:00Z',
+      '2022-04-25T15:30:00',
     );
   });
 

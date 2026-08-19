@@ -179,14 +179,16 @@ CSIDs are environment-exclusive — one never works in another.
 14. **Simulation enforces the compliance-check gate that sandbox skips**
     (`Missing-ComplianceSteps` names exactly which document types are
     missing — one per type declared in your CSR's invoice-type map).
-15. **QR tag 3 takes seconds precision — `2022-04-25T15:30:00Z`, no
-    milliseconds.** `Date.toISOString()` (JS) and `toIso8601String()`
-    (Dart) both emit `.000Z`, which diverges from ZATCA's published
-    sample AND can never equal the invoice XML's `cbc:IssueTime`
-    (HH:MM:SS) that Phase 2 validation cross-checks the QR against.
-    Sneaky because per-field tests happily assert the wrong string —
-    lock your builder against ZATCA's published sample base64, byte
-    for byte, like `qr.spec.ts` does.
+15. **QR tag 3 is `2022-04-25T15:30:00` — seconds precision, no
+    milliseconds, and NO `Z`.** Live-verified: the phase-2 KSA-25 check
+    wants tag 3 byte-equal to `IssueDate + 'T' + IssueTime`, and a `Z`
+    draws `invoiceTimeStamp_QRCODE_INVALID`; ZATCA's own SDK emits no Z.
+    Meanwhile ZATCA's PUBLISHED phase-1 sample carries a Z — the
+    published sample and the live validator disagree, and the live
+    validator wins. (`Date.toISOString()` / Dart's `toIso8601String()`
+    are wrong twice over: `.000` millis AND the Z.) Per-field tests
+    happily assert whatever you wrote — lock the full base64, byte for
+    byte, against a LIVE-ACCEPTED vector like `qr.spec.ts` does.
 16. **QR tag 8 is the FULL SubjectPublicKeyInfo DER (88 bytes), not the
     bare 65-byte EC point.** Every X.509 parser hands you the tempting
     raw `04‖X‖Y` from the BIT STRING; ZATCA's validation wants the whole
@@ -197,6 +199,23 @@ CSIDs are environment-exclusive — one never works in another.
     documents 208, the live service now sends 409 — treat both as
     "already filed", and remember a duplicate clearance reply carries NO
     clearedInvoice (your archived first response is the legal copy).
+17. **The invoice hash is NOT what the signature's declared transforms
+    say.** The SDK's real pipeline is an identity XSLT dropping
+    UBLExtensions/Signature/QR-ADR (element bytes only — surrounding
+    whitespace text nodes SURVIVE), no XML declaration, then C14N11.
+    And the SignedProperties digest is over the RENDERED block
+    re-serialized by a plain Java Transformer: document indentation
+    kept, `xmlns:ds` added to every ds: element, empty DigestMethod
+    self-closed. The community's deeper-indented "for signing" template
+    only works when your document happens to render at that indent.
+    Related: quotes in TEXT stay bare (C14N doesn't escape them there),
+    the KSA-2 subtype for a plain receipt is `0200000` (the samples'
+    `0211010` sets the summary bit → BR-KSA-71 warnings), and the SDK
+    CLI **on Windows** hashes Arabic invoices wrong (it decodes its own
+    transform output with the platform charset — run it with
+    `-Dfile.encoding=UTF-8` to match ZATCA's Linux servers). All of
+    this was proven 2026-08-19 with a clean live acceptance:
+    `reportingStatus REPORTED`, zero warnings, zero errors.
 
 ## Design principles
 
