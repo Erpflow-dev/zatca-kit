@@ -62,8 +62,10 @@ export function formatQrTimestamp(date: Date): string {
 
 /** "2550" halalas → "25.50" (ZATCA wants decimal SAR with 2 places). */
 export function halalasToSar(halalas: number): string {
-  if (!Number.isInteger(halalas)) {
-    throw new TypeError(`halalas must be an integer, got ${halalas}`);
+  // isSafeInteger, not isInteger: past 2^53 JS has ALREADY silently
+  // rounded the halalas — the money is wrong before we ever format it.
+  if (!Number.isSafeInteger(halalas)) {
+    throw new TypeError(`halalas must be a safe integer, got ${halalas}`);
   }
   const sign = halalas < 0 ? '-' : '';
   const abs = Math.abs(halalas);

@@ -294,6 +294,33 @@ describe('FatooraClient onboarding endpoints', () => {
     expect(out.validationResults?.erroMessages).toEqual([]);
   });
 
+  it('complianceCheck: 200 with an EMPTY body fails closed', async () => {
+    // No validationResults, no disposition — nothing proves ZATCA
+    // validated anything. ok: true here would let onboarding claim a
+    // compliance pass with zero evidence.
+    stub(200, '{}');
+    const out = await new FatooraClient().complianceCheck(creds, {
+      invoiceHash: invoice.invoiceHash,
+      uuid: invoice.uuid,
+      invoiceXmlBase64: invoice.invoiceXmlBase64,
+    });
+    expect(out.ok).toBe(false);
+  });
+
+  it('clearStandard: 200 with an EMPTY body fails closed', async () => {
+    // "Cleared" without the stamped clearedInvoice is a state a taxpayer
+    // must never be left in — the legal copy IS the point of clearance.
+    stub(200, '{}');
+    const out = await new FatooraClient().clearStandard({
+      creds,
+      invoiceHash: invoice.invoiceHash,
+      uuid: invoice.uuid,
+      invoiceXmlBase64: invoice.invoiceXmlBase64,
+    });
+    expect(out.ok).toBe(false);
+    expect(out.duplicate).toBe(false);
+  });
+
   it('clearStandard: 200 carries the legal clearedInvoice, not a duplicate', async () => {
     stub(
       200,

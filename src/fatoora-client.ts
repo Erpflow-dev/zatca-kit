@@ -192,8 +192,19 @@ export class FatooraClient {
       clearanceStatus?: string;
       clearedInvoice?: string;
     }>(res.body);
+    // A FIRST-time clearance is only ok with the evidence in hand:
+    // CLEARED + the stamped clearedInvoice (the legal copy). A 200 with
+    // an empty body fails CLOSED — "cleared" without the legal document
+    // is exactly the state a taxpayer must never be left in.
+    const cleared =
+      res.status >= 200 &&
+      res.status < 300 &&
+      !duplicate &&
+      parsed?.clearanceStatus === 'CLEARED' &&
+      typeof parsed?.clearedInvoice === 'string' &&
+      parsed.clearedInvoice.length > 0;
     return {
-      ok: (res.status >= 200 && res.status < 300) || duplicate,
+      ok: cleared || duplicate,
       rejected: res.status === 400,
       duplicate,
       status: res.status,
@@ -297,8 +308,10 @@ export class FatooraClient {
       validationResults?: ComplianceCheckOutcome['validationResults'];
     }>(res.body);
     // Trap 3 applies HERE too: failures can ride inside HTTP 200. `ok`
-    // demands a clean validation — no errorMessages (either spelling)
-    // and no NOT_REPORTED / NOT_CLEARED disposition.
+    // demands POSITIVE evidence, never absence of evidence: a disposition
+    // must be present and not NOT_*, and errorMessages (either spelling)
+    // must be empty. An empty body fails CLOSED — a 200 with `{}` proves
+    // nothing was validated.
     const errors =
       parsed?.validationResults?.errorMessages ??
       parsed?.validationResults?.erroMessages ??
@@ -309,6 +322,7 @@ export class FatooraClient {
       ok:
         (res.status === 200 || res.status === 202) &&
         errors.length === 0 &&
+        disposition.length > 0 &&
         !disposition.startsWith('NOT_'),
       reportingStatus: parsed?.reportingStatus ?? null,
       clearanceStatus: parsed?.clearanceStatus ?? null,

@@ -44,8 +44,13 @@ export class ZatcaReportingService {
     for (const row of tenants.rows) {
       const tenantId = row.tenants_with_pending_invoices;
       await this.db.withTenant(tenantId, async (client) => {
+        // Environment-scoped: credentials issued for one ZATCA
+        // environment must never be replayed against another after an
+        // ops switch of the base URL — mismatches skip instead of 401ing
+        // (or worse, silently submitting to the wrong environment).
         const creds = await client.query(
-          'select cert, secret from zatca_credentials',
+          'select cert, secret from zatca_credentials where environment = $1',
+          [this.fatoora.environment()],
         );
         const pending = await client.query(
           `select id, zatca_uuid, invoice_hash, xml from invoices

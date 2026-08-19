@@ -127,6 +127,11 @@ describe('halalasToSar', () => {
   it('refuses non-integer amounts — money never floats', () => {
     expect(() => halalasToSar(25.5)).toThrow(TypeError);
   });
+
+  it('refuses unsafe integers — precision is already gone past 2^53', () => {
+    expect(() => halalasToSar(Number.MAX_SAFE_INTEGER + 1)).toThrow(TypeError);
+    expect(halalasToSar(Number.MAX_SAFE_INTEGER)).toMatch(/\.\d{2}$/);
+  });
 });
 
 describe('buildPhase2Qr', () => {
