@@ -10,6 +10,8 @@ export interface FatooraCredentials {
 
 export interface ReportOutcome {
   ok: boolean;
+  /** REPORTED on live success (200 and 202 alike); null when absent. */
+  reportingStatus: string | null;
   /**
    * The invoice itself was rejected — retrying the same XML is pointless.
    * ONLY 400 qualifies. 401/406 are our credentials/headers being wrong, and
@@ -54,10 +56,11 @@ export interface ClearanceOutcome {
   /** 400 — ZATCA rejected THIS invoice; retrying the same XML is pointless. */
   rejected: boolean;
   /**
-   * Already cleared earlier (208 per spec, 409 on the live service). ok
-   * stays true BUT clearedInvoiceBase64 is null — the legal stamped copy
-   * came with the FIRST response; callers must use their archived one,
-   * never treat this reply as carrying it.
+   * Replay detected (208 per the official contract, 409 observed live).
+   * NOT ok by itself: when the reply carries CLEARED + clearedInvoice
+   * (the contract's 208 shape) ok is true with the legal copy in hand;
+   * an EMPTY duplicate reply leaves ok false and the caller resolves
+   * against its archived first response — never against this reply.
    */
   duplicate: boolean;
   status: number;
@@ -114,6 +117,20 @@ export class FatooraClient {
     process.env.ZATCA_API_BASE ??
     'https://gw-fatoora.zatca.gov.sa/e-invoicing/developer-portal';
 
+  /**
+   * Which of the three independent environments this client posts to —
+   * the authority every credential lookup must scope by (a sandbox CSID
+   * against simulation is a guaranteed 401; worse, credentials could be
+   * replayed against the wrong environment after an ops base-URL switch).
+   */
+  environment(): 'sandbox' | 'simulation' | 'production' {
+    if (this.baseUrl.includes('/simulation')) return 'simulation';
+    if (this.baseUrl.endsWith('/core') || this.baseUrl.includes('/core/')) {
+      return 'production';
+    }
+    return 'sandbox';
+  }
+
   async reportSimplified(params: {
     creds: FatooraCredentials;
     invoiceHash: string;
@@ -146,10 +163,19 @@ export class FatooraClient {
     // (208 was the spec's duplicate code before the live service moved to
     // 409 — accept both, flagged so callers can tell replay from first.)
     const duplicate = res.status === 208 || res.status === 409;
+    // First-time success needs POSITIVE evidence, not just a 2xx: the live
+    // contract answers 200/202 with reportingStatus REPORTED (both
+    // observed live 2026-08-19). A 200 with an empty body proves nothing
+    // and must never mark an invoice reported permanently.
+    const parsed = this.tryJson<{ reportingStatus?: string }>(res.body);
+    const reported =
+      (res.status === 200 || res.status === 202) &&
+      parsed?.reportingStatus === 'REPORTED';
     return {
-      ok: (res.status >= 200 && res.status < 300) || duplicate,
+      ok: reported || duplicate,
       rejected: res.status === 400,
       duplicate,
+      reportingStatus: parsed?.reportingStatus ?? null,
       status: res.status,
       body: res.body,
     };
@@ -181,30 +207,26 @@ export class FatooraClient {
       },
       body: JSON.stringify({ invoiceHash, uuid, invoice: invoiceXmlBase64 }),
     });
-    // Duplicate submission: the spec documents 208, the live service now
-    // sends 409 (the same 208→409 migration production integrators log).
-    // A duplicate is a success — the invoice WAS cleared — but this
-    // response has no clearedInvoice: the caller's archived copy from the
-    // first submission is the legal document, and `duplicate` makes that
-    // impossible to miss.
+    // Duplicate submission: the official contract documents 208 (whose
+    // body still carries CLEARED + clearedInvoice); the live service has
+    // been observed sending 409 for replays. Either way, `ok` NEVER
+    // comes from the status code alone: it requires the evidence —
+    // clearanceStatus CLEARED plus the stamped clearedInvoice (the legal
+    // copy). A 208/409 with an empty body is flagged `duplicate` but NOT
+    // ok — the caller resolves it against its archived first response
+    // instead of treating this reply as proof of anything.
     const duplicate = res.status === 208 || res.status === 409;
     const parsed = this.tryJson<{
       clearanceStatus?: string;
       clearedInvoice?: string;
     }>(res.body);
-    // A FIRST-time clearance is only ok with the evidence in hand:
-    // CLEARED + the stamped clearedInvoice (the legal copy). A 200 with
-    // an empty body fails CLOSED — "cleared" without the legal document
-    // is exactly the state a taxpayer must never be left in.
     const cleared =
-      res.status >= 200 &&
-      res.status < 300 &&
-      !duplicate &&
+      ((res.status >= 200 && res.status < 300) || res.status === 409) &&
       parsed?.clearanceStatus === 'CLEARED' &&
       typeof parsed?.clearedInvoice === 'string' &&
       parsed.clearedInvoice.length > 0;
     return {
-      ok: cleared || duplicate,
+      ok: cleared,
       rejected: res.status === 400,
       duplicate,
       status: res.status,
@@ -308,22 +330,24 @@ export class FatooraClient {
       validationResults?: ComplianceCheckOutcome['validationResults'];
     }>(res.body);
     // Trap 3 applies HERE too: failures can ride inside HTTP 200. `ok`
-    // demands POSITIVE evidence, never absence of evidence: a disposition
-    // must be present and not NOT_*, and errorMessages (either spelling)
-    // must be empty. An empty body fails CLOSED — a 200 with `{}` proves
-    // nothing was validated.
-    const errors =
-      parsed?.validationResults?.errorMessages ??
-      parsed?.validationResults?.erroMessages ??
-      [];
+    // demands FULL positive evidence, never absence of evidence:
+    //  - HTTP 200 exactly (the compliance contract defines no 202);
+    //  - a REPORTED/CLEARED disposition;
+    //  - validationResults PRESENT with status PASS or WARNING (a body
+    //    missing them, or carrying status ERROR with a conveniently
+    //    empty error list, proves nothing passed);
+    //  - zero errorMessages (either spelling).
+    const vr = parsed?.validationResults;
+    const errors = vr?.errorMessages ?? vr?.erroMessages ?? [];
+    const vrStatus = String(vr?.status ?? '').toUpperCase();
     const disposition = parsed?.reportingStatus ?? parsed?.clearanceStatus ?? '';
     return {
       status: res.status,
       ok:
-        (res.status === 200 || res.status === 202) &&
-        errors.length === 0 &&
-        disposition.length > 0 &&
-        !disposition.startsWith('NOT_'),
+        res.status === 200 &&
+        (disposition === 'REPORTED' || disposition === 'CLEARED') &&
+        (vrStatus === 'PASS' || vrStatus === 'WARNING') &&
+        errors.length === 0,
       reportingStatus: parsed?.reportingStatus ?? null,
       clearanceStatus: parsed?.clearanceStatus ?? null,
       validationResults: parsed?.validationResults ?? null,

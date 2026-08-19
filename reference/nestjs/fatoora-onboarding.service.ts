@@ -229,7 +229,13 @@ export class FatooraOnboardingService {
           order by kind, created_at desc`,
         [environment],
       );
-      const creds = await client.query('select 1 from zatca_credentials');
+      // Environment-scoped like the worker's read: credentials from an
+      // OLD environment must not make status() claim reporting is
+      // configured after a base-URL switch.
+      const creds = await client.query(
+        'select 1 from zatca_credentials where environment = $1',
+        [environment],
+      );
       const compliance = rows.find((r) => r.kind === 'compliance') ?? null;
       const production = rows.find((r) => r.kind === 'production') ?? null;
       return {

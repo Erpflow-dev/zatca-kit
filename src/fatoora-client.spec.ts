@@ -71,14 +71,35 @@ describe('FatooraClient.reportSimplified', () => {
     );
   });
 
-  it('treats 202 (accepted with warnings) as reported', async () => {
-    stubFetch(202);
+  it('treats 202 with reportingStatus REPORTED as reported', async () => {
+    // Live shape 2026-08-19: 202 = accepted with warnings, body still
+    // carries reportingStatus REPORTED.
+    stubFetch(202, '{"reportingStatus":"REPORTED"}');
     const out = await new FatooraClient().reportSimplified({
       creds,
       ...invoice,
     });
-    expect(out).toMatchObject({ ok: true, rejected: false });
+    expect(out).toMatchObject({
+      ok: true,
+      rejected: false,
+      reportingStatus: 'REPORTED',
+    });
   });
+
+  it.each([200, 202])(
+    '%i with an EMPTY body fails closed — no REPORTED, no success',
+    async (status) => {
+      // A bare 2xx proves nothing; marking the invoice reported forever
+      // on it would fail open.
+      stubFetch(status, '{}');
+      const out = await new FatooraClient().reportSimplified({
+        creds,
+        ...invoice,
+      });
+      expect(out.ok).toBe(false);
+      expect(out.rejected).toBe(false);
+    },
+  );
 
   it.each([409, 208])(
     'treats %i as duplicate-SUCCESS — ZATCA already has the invoice',
@@ -307,6 +328,50 @@ describe('FatooraClient onboarding endpoints', () => {
     expect(out.ok).toBe(false);
   });
 
+  it('complianceCheck: REPORTED without validationResults fails closed', async () => {
+    stub(200, JSON.stringify({ reportingStatus: 'REPORTED' }));
+    const out = await new FatooraClient().complianceCheck(creds, {
+      invoiceHash: invoice.invoiceHash,
+      uuid: invoice.uuid,
+      invoiceXmlBase64: invoice.invoiceXmlBase64,
+    });
+    expect(out.ok).toBe(false);
+  });
+
+  it('complianceCheck: status ERROR with an empty error list fails closed', async () => {
+    // The convenient-empty-list trap: status says ERROR, the list says
+    // nothing — believe the status.
+    stub(
+      200,
+      JSON.stringify({
+        reportingStatus: 'REPORTED',
+        validationResults: { status: 'ERROR', errorMessages: [] },
+      }),
+    );
+    const out = await new FatooraClient().complianceCheck(creds, {
+      invoiceHash: invoice.invoiceHash,
+      uuid: invoice.uuid,
+      invoiceXmlBase64: invoice.invoiceXmlBase64,
+    });
+    expect(out.ok).toBe(false);
+  });
+
+  it('complianceCheck: 202 is not a defined compliance response — not ok', async () => {
+    stub(
+      202,
+      JSON.stringify({
+        reportingStatus: 'REPORTED',
+        validationResults: { status: 'PASS', errorMessages: [] },
+      }),
+    );
+    const out = await new FatooraClient().complianceCheck(creds, {
+      invoiceHash: invoice.invoiceHash,
+      uuid: invoice.uuid,
+      invoiceXmlBase64: invoice.invoiceXmlBase64,
+    });
+    expect(out.ok).toBe(false);
+  });
+
   it('clearStandard: 200 with an EMPTY body fails closed', async () => {
     // "Cleared" without the stamped clearedInvoice is a state a taxpayer
     // must never be left in — the legal copy IS the point of clearance.
@@ -337,12 +402,30 @@ describe('FatooraClient onboarding endpoints', () => {
     expect(out.clearedInvoiceBase64).toBe('UEsF');
   });
 
+  it('clearStandard: 208 WITH the contract payload is ok + duplicate', async () => {
+    // The official contract's 208 still carries CLEARED + clearedInvoice.
+    stub(
+      208,
+      JSON.stringify({ clearanceStatus: 'CLEARED', clearedInvoice: 'UEsF' }),
+    );
+    const out = await new FatooraClient().clearStandard({
+      creds,
+      invoiceHash: invoice.invoiceHash,
+      uuid: invoice.uuid,
+      invoiceXmlBase64: invoice.invoiceXmlBase64,
+    });
+    expect(out.ok).toBe(true);
+    expect(out.duplicate).toBe(true);
+    expect(out.clearedInvoiceBase64).toBe('UEsF');
+  });
+
   it.each([208, 409])(
-    'clearStandard: %i is duplicate-success WITHOUT a clearedInvoice',
+    'clearStandard: EMPTY %i is duplicate but NOT ok — no legal copy here',
     async (status) => {
-      // Spec documented 208 for replays; the live service moved to 409.
-      // Either way the stamped XML came with the FIRST response — this
-      // reply must never be treated as carrying the legal copy.
+      // A bare replay status without the stamped XML proves nothing this
+      // reply can vouch for; the caller resolves it against its archived
+      // first response. ok: true here would record "cleared" with no
+      // legal document anywhere.
       stub(status, '{}');
       const out = await new FatooraClient().clearStandard({
         creds,
@@ -350,8 +433,9 @@ describe('FatooraClient onboarding endpoints', () => {
         uuid: invoice.uuid,
         invoiceXmlBase64: invoice.invoiceXmlBase64,
       });
-      expect(out.ok).toBe(true);
+      expect(out.ok).toBe(false);
       expect(out.duplicate).toBe(true);
+      expect(out.rejected).toBe(false);
       expect(out.clearedInvoiceBase64).toBeNull();
     },
   );
