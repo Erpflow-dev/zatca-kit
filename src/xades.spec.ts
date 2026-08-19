@@ -109,6 +109,21 @@ describe('signInvoiceHash', () => {
     verifier.update(Buffer.from(invoiceHash, 'base64'));
     expect(verifier.verify(publicKey, Buffer.from(sig, 'base64'))).toBe(true);
   });
+
+  it('rejects hashes that are not canonical base64 of exactly 32 bytes', () => {
+    const { privateKey } = generateKeyPairSync('ec', {
+      namedCurve: 'secp256k1',
+    });
+    const pem = privateKey.export({ type: 'sec1', format: 'pem' }).toString();
+    for (const bad of [
+      'not-base64!!!', // Node's lenient decoder would sign this garbage
+      'QUJD', // valid base64, but 3 bytes — not a SHA-256
+      Buffer.from('a'.repeat(31)).toString('base64'), // 31 bytes
+      Buffer.from('a'.repeat(32)).toString('base64').slice(0, -1), // broken padding
+    ]) {
+      expect(() => signInvoiceHash(bad, pem)).toThrow(TypeError);
+    }
+  });
 });
 
 describe('buildXadesExtension', () => {

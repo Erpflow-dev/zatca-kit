@@ -15,6 +15,7 @@
  * Do not reformat either template.
  */
 import { X509Certificate, createHash, createSign } from 'node:crypto';
+import { decodeBase64Strict } from './base64';
 
 export interface CertificateInfo {
   /** The bare base64-DER text (goes verbatim into ds:X509Certificate). */
@@ -132,13 +133,25 @@ export function parseCertificate(base64Der: string): CertificateInfo {
 
 // ---- signing ---------------------------------------------------------------
 
-/** ECDSA-SHA256 over the base64-DECODED invoice hash bytes, DER, base64. */
+/**
+ * ECDSA-SHA256 over the base64-DECODED invoice hash bytes, DER, base64.
+ * The hash must decode canonically to EXACTLY 32 bytes (SHA-256): Node's
+ * lenient decoder would happily "decode" `not-base64!!!` and sign the
+ * resulting garbage, producing a signature that can never verify against
+ * the real invoice.
+ */
 export function signInvoiceHash(
   invoiceHashBase64: string,
   privateKeyPem: string,
 ): string {
+  const hash = decodeBase64Strict(invoiceHashBase64, 'invoiceHashBase64');
+  if (hash.length !== 32) {
+    throw new TypeError(
+      `invoiceHashBase64 must decode to 32 SHA-256 bytes, got ${hash.length}`,
+    );
+  }
   const signer = createSign('sha256');
-  signer.update(Buffer.from(invoiceHashBase64, 'base64'));
+  signer.update(hash);
   return signer.sign(privateKeyPem).toString('base64');
 }
 

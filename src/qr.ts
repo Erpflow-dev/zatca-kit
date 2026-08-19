@@ -6,7 +6,7 @@
  * small tenants this is ALL of ZATCA compliance. Structure per tag:
  * [tag: 1 byte][length: 1 byte][UTF-8 value], concatenated then base64d.
  *
- *   1 seller name        2 VAT number          3 ISO-8601 UTC timestamp
+ *   1 seller name        2 VAT number          3 timestamp (AST, no zone)
  *   4 total with VAT     5 VAT amount          (amounts as "25.50" strings)
  *
  * PHASE 2 (integration) reuses tags 1–5 and adds the cryptographic stamp:
@@ -25,8 +25,16 @@
 export interface Phase1Fields {
   sellerName: string;
   vatNumber: string;
-  /** Invoice issue time; encoded as UTC ISO-8601. */
-  timestamp: Date;
+  /**
+   * Invoice issue time. PREFER the string form: the exact
+   * `IssueDate + 'T' + IssueTime` from the invoice XML, passed through
+   * verbatim — tag 3 must be byte-equal to the XML (KSA-25), and only the
+   * caller knows the XML's wall-clock time. A `Date` is converted to
+   * Arabia Standard Time (UTC+3, no DST) — NOT to UTC: ZATCA reads a
+   * suffix-less timestamp as Saudi local time, so emitting shifted UTC
+   * digits without the `Z` would corrupt the time by three hours.
+   */
+  timestamp: Date | string;
   totalWithVatHalalas: number;
   vatHalalas: number;
 }
@@ -56,9 +64,27 @@ export interface Phase2Fields extends Phase1Fields {
  * `invoiceTimeStamp_QRCODE_INVALID`; ZATCA's own SDK emits no Z. Note
  * the trap: ZATCA's PUBLISHED phase-1 sample carries a Z — the published
  * sample and the live validator disagree, and the live validator wins.
+ *
+ * A suffix-less timestamp is read as SAUDI LOCAL TIME (AST, UTC+3), so a
+ * `Date` is rendered as AST wall-clock digits — never as UTC digits with
+ * the Z merely deleted (that would silently shift the time by 3 hours).
+ * A string is the caller's own `IssueDate + 'T' + IssueTime` and passes
+ * through verbatim after a format check, keeping tag 3 byte-equal to the
+ * invoice XML.
  */
-export function formatQrTimestamp(date: Date): string {
-  return date.toISOString().replace(/\.\d{3}Z$/, '').replace(/Z$/, '');
+export function formatQrTimestamp(date: Date | string): string {
+  if (typeof date === 'string') {
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(date)) {
+      throw new TypeError(
+        `timestamp string must be YYYY-MM-DDTHH:mm:ss (no zone suffix, ` +
+          `exactly the XML IssueDate + 'T' + IssueTime), got '${date}'`,
+      );
+    }
+    return date;
+  }
+  // AST = UTC+3, permanently (Saudi Arabia has no DST).
+  const ast = new Date(date.getTime() + 3 * 3_600_000);
+  return ast.toISOString().replace(/\.\d{3}Z$/, '');
 }
 
 /** "2550" halalas → "25.50" (ZATCA wants decimal SAR with 2 places). */
@@ -120,6 +146,19 @@ export function buildPhase1Qr(fields: Phase1Fields): string {
 /** Phase-2 (integration) QR payload — BR-KSA-27. Tag 9 rides only when
  * provided (simplified invoices); standard invoices omit it. */
 export function buildPhase2Qr(fields: Phase2Fields): string {
+  // Tag 8 must be the COMPLETE DER SubjectPublicKeyInfo — 88 bytes for
+  // secp256k1, starting with a DER SEQUENCE (0x30). Accepting anything
+  // shorter (the bare 65-byte point is the classic mistake) rebuilds the
+  // exact tag-8 compliance failure this field's docs warn about, so it
+  // fails here instead of inside ZATCA's validator.
+  const pk = fields.publicKeyBytes;
+  if (pk.length !== 88 || pk[0] !== 0x30) {
+    throw new TypeError(
+      `publicKeyBytes must be the full 88-byte DER SubjectPublicKeyInfo ` +
+        `for secp256k1 (starts 0x30), got ${pk.length} byte(s)` +
+        (pk.length > 0 ? ` starting 0x${pk[0].toString(16)}` : ''),
+    );
+  }
   return encodeQr([
     ...phase1Tlvs(fields),
     tlv(6, utf8(fields.invoiceHashBase64)),

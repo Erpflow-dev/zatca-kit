@@ -1,3 +1,5 @@
+import { decodeBase64Strict } from './base64';
+
 export interface FatooraCredentials {
   /**
    * The CSID `binarySecurityToken` exactly as ZATCA returned it. It is
@@ -113,9 +115,13 @@ interface RawCsidBody {
  * CSID never works in production.
  */
 export class FatooraClient {
-  private readonly baseUrl =
+  // Trailing slashes are stripped: `${base}${path}` with a slashed base
+  // yields `.../simulation//compliance`, and gateways are free to 404
+  // double slashes even when the un-doubled path would have worked.
+  private readonly baseUrl = (
     process.env.ZATCA_API_BASE ??
-    'https://gw-fatoora.zatca.gov.sa/e-invoicing/developer-portal';
+    'https://gw-fatoora.zatca.gov.sa/e-invoicing/developer-portal'
+  ).replace(/\/+$/, '');
 
   /**
    * Which of the three independent environments this client posts to —
@@ -166,11 +172,33 @@ export class FatooraClient {
     // First-time success needs POSITIVE evidence, not just a 2xx: the live
     // contract answers 200/202 with reportingStatus REPORTED (both
     // observed live 2026-08-19). A 200 with an empty body proves nothing
-    // and must never mark an invoice reported permanently.
-    const parsed = this.tryJson<{ reportingStatus?: string }>(res.body);
+    // and must never mark an invoice reported permanently. And REPORTED
+    // alone is not enough when the SAME body contradicts it: a
+    // validationResults block with status ERROR or actual error entries
+    // (either spelling — the live service has used both `errorMessages`
+    // and `erroMessages`) means the invoice did NOT pass, whatever the
+    // top-level disposition claims.
+    const parsed = this.tryJson<{
+      reportingStatus?: string;
+      validationResults?: {
+        status?: string;
+        errorMessages?: unknown[];
+        erroMessages?: unknown[];
+      };
+    }>(res.body);
+    const vr = parsed?.validationResults;
+    const vrErrors = [
+      ...(vr?.errorMessages ?? []),
+      ...(vr?.erroMessages ?? []),
+    ];
+    const contradicted =
+      vr != null &&
+      (String(vr.status ?? '').toUpperCase() === 'ERROR' ||
+        vrErrors.length > 0);
     const reported =
       (res.status === 200 || res.status === 202) &&
-      parsed?.reportingStatus === 'REPORTED';
+      parsed?.reportingStatus === 'REPORTED' &&
+      !contradicted;
     return {
       ok: reported || duplicate,
       rejected: res.status === 400,
@@ -220,11 +248,15 @@ export class FatooraClient {
       clearanceStatus?: string;
       clearedInvoice?: string;
     }>(res.body);
+    // The stamped copy is about to become the LEGAL invoice we archive
+    // and hand to the buyer — "non-empty string" is not evidence it is
+    // one. It must be canonical base64 whose decoded bytes are XML;
+    // `*** not base64 ***` must never be filed as a legal document.
     const cleared =
       ((res.status >= 200 && res.status < 300) || res.status === 409) &&
       parsed?.clearanceStatus === 'CLEARED' &&
       typeof parsed?.clearedInvoice === 'string' &&
-      parsed.clearedInvoice.length > 0;
+      this.isBase64Xml(parsed.clearedInvoice);
     return {
       ok: cleared,
       rejected: res.status === 400,
@@ -338,7 +370,10 @@ export class FatooraClient {
     //    empty error list, proves nothing passed);
     //  - zero errorMessages (either spelling).
     const vr = parsed?.validationResults;
-    const errors = vr?.errorMessages ?? vr?.erroMessages ?? [];
+    // MERGE both spellings, never coalesce: `errorMessages: []` beside a
+    // populated `erroMessages` would otherwise short-circuit the check
+    // and hide the real errors.
+    const errors = [...(vr?.errorMessages ?? []), ...(vr?.erroMessages ?? [])];
     const vrStatus = String(vr?.status ?? '').toUpperCase();
     const disposition = parsed?.reportingStatus ?? parsed?.clearanceStatus ?? '';
     return {
@@ -401,6 +436,21 @@ export class FatooraClient {
       errors: parsed?.errors ?? null,
       body: res.body,
     };
+  }
+
+  /**
+   * Is this canonical base64 whose decoded bytes are an XML document?
+   * (UTF-8 BOM tolerated; the decoded text must start with `<`.) Used to
+   * vet ZATCA's `clearedInvoice` before it is declared the legal copy.
+   */
+  private isBase64Xml(value: string): boolean {
+    try {
+      const decoded = decodeBase64Strict(value, 'clearedInvoice');
+      const text = decoded.toString('utf8').replace(/^﻿/, '').trimStart();
+      return text.startsWith('<');
+    } catch {
+      return false;
+    }
   }
 
   private tryJson<T>(body: string): T | null {

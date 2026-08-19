@@ -22,6 +22,10 @@ function stubFetch(status: number, body = '{}'): FetchArgs[] {
 }
 
 const creds = { cert: 'TUlJQ1BUQ0NBZU9n', secret: 's3cr3t=' };
+/** A cleared-invoice stand-in that is REAL base64 of REAL XML. */
+const XML_B64 = Buffer.from('<?xml version="1.0"?><Invoice/>').toString(
+  'base64',
+);
 const invoice = {
   invoiceHash: 'vLGQoYNoM3tf1XAxKpoNTSz/8pkdidXy47HWh0VQmu8=',
   uuid: '8e6000cf-1a98-4174-b3e7-b5d5954bc10d',
@@ -69,6 +73,72 @@ describe('FatooraClient.reportSimplified', () => {
       'https://gw-fatoora.zatca.gov.sa/e-invoicing/simulation' +
         '/invoices/reporting/single',
     );
+  });
+
+  it('strips trailing slashes from ZATCA_API_BASE — no double-slash paths', async () => {
+    process.env.ZATCA_API_BASE =
+      'https://gw-fatoora.zatca.gov.sa/e-invoicing/simulation/';
+    const calls = stubFetch(200);
+    await new FatooraClient().reportSimplified({ creds, ...invoice });
+    expect(calls[0][0]).toBe(
+      'https://gw-fatoora.zatca.gov.sa/e-invoicing/simulation' +
+        '/invoices/reporting/single',
+    );
+  });
+
+  it('200 REPORTED contradicted by validationResults ERROR fails closed', async () => {
+    // The top-level disposition says filed; the SAME body says the
+    // invoice failed validation. Marking it permanently reported on the
+    // strength of the contradicted disposition would bury the error.
+    stubFetch(
+      200,
+      JSON.stringify({
+        reportingStatus: 'REPORTED',
+        validationResults: {
+          status: 'ERROR',
+          errorMessages: [{ code: 'BR-KSA-X', message: 'boom' }],
+        },
+      }),
+    );
+    const out = await new FatooraClient().reportSimplified({
+      creds,
+      ...invoice,
+    });
+    expect(out.ok).toBe(false);
+  });
+
+  it("200 REPORTED with errors only under ZATCA's erroMessages typo also fails closed", async () => {
+    stubFetch(
+      200,
+      JSON.stringify({
+        reportingStatus: 'REPORTED',
+        validationResults: {
+          status: 'PASS',
+          errorMessages: [],
+          erroMessages: [{ code: 'BR-KSA-Y', message: 'hidden' }],
+        },
+      }),
+    );
+    const out = await new FatooraClient().reportSimplified({
+      creds,
+      ...invoice,
+    });
+    expect(out.ok).toBe(false);
+  });
+
+  it('200 REPORTED with a PASS validationResults block stays ok', async () => {
+    stubFetch(
+      200,
+      JSON.stringify({
+        reportingStatus: 'REPORTED',
+        validationResults: { status: 'PASS', errorMessages: [] },
+      }),
+    );
+    const out = await new FatooraClient().reportSimplified({
+      creds,
+      ...invoice,
+    });
+    expect(out.ok).toBe(true);
   });
 
   it('treats 202 with reportingStatus REPORTED as reported', async () => {
@@ -315,6 +385,29 @@ describe('FatooraClient onboarding endpoints', () => {
     expect(out.validationResults?.erroMessages).toEqual([]);
   });
 
+  it('complianceCheck: errors hiding under the erroMessages spelling beside an EMPTY errorMessages fail closed', async () => {
+    // Coalescing (?? ) between the two spellings would pick the empty
+    // `errorMessages` array and never look at the populated one. The
+    // spellings must MERGE.
+    stub(
+      200,
+      JSON.stringify({
+        reportingStatus: 'REPORTED',
+        validationResults: {
+          status: 'PASS',
+          errorMessages: [],
+          erroMessages: [{ code: 'BR-KSA-Z', message: 'real error' }],
+        },
+      }),
+    );
+    const out = await new FatooraClient().complianceCheck(creds, {
+      invoiceHash: invoice.invoiceHash,
+      uuid: invoice.uuid,
+      invoiceXmlBase64: invoice.invoiceXmlBase64,
+    });
+    expect(out.ok).toBe(false);
+  });
+
   it('complianceCheck: 200 with an EMPTY body fails closed', async () => {
     // No validationResults, no disposition — nothing proves ZATCA
     // validated anything. ok: true here would let onboarding claim a
@@ -389,7 +482,7 @@ describe('FatooraClient onboarding endpoints', () => {
   it('clearStandard: 200 carries the legal clearedInvoice, not a duplicate', async () => {
     stub(
       200,
-      JSON.stringify({ clearanceStatus: 'CLEARED', clearedInvoice: 'UEsF' }),
+      JSON.stringify({ clearanceStatus: 'CLEARED', clearedInvoice: XML_B64 }),
     );
     const out = await new FatooraClient().clearStandard({
       creds,
@@ -399,14 +492,36 @@ describe('FatooraClient onboarding endpoints', () => {
     });
     expect(out.ok).toBe(true);
     expect(out.duplicate).toBe(false);
-    expect(out.clearedInvoiceBase64).toBe('UEsF');
+    expect(out.clearedInvoiceBase64).toBe(XML_B64);
+  });
+
+  it('clearStandard: CLEARED with a clearedInvoice that is not base64 XML fails closed', async () => {
+    // The stamped copy becomes the LEGAL invoice we archive and hand to
+    // the buyer — garbage must never be filed as a legal document.
+    for (const junk of [
+      '*** not base64 ***',
+      'AAAA', // canonical base64, but the bytes are not XML
+      'PD94bWw', // non-canonical (unpadded) even though it decodes
+    ]) {
+      stub(
+        200,
+        JSON.stringify({ clearanceStatus: 'CLEARED', clearedInvoice: junk }),
+      );
+      const out = await new FatooraClient().clearStandard({
+        creds,
+        invoiceHash: invoice.invoiceHash,
+        uuid: invoice.uuid,
+        invoiceXmlBase64: invoice.invoiceXmlBase64,
+      });
+      expect(out.ok).toBe(false);
+    }
   });
 
   it('clearStandard: 208 WITH the contract payload is ok + duplicate', async () => {
     // The official contract's 208 still carries CLEARED + clearedInvoice.
     stub(
       208,
-      JSON.stringify({ clearanceStatus: 'CLEARED', clearedInvoice: 'UEsF' }),
+      JSON.stringify({ clearanceStatus: 'CLEARED', clearedInvoice: XML_B64 }),
     );
     const out = await new FatooraClient().clearStandard({
       creds,
@@ -416,7 +531,7 @@ describe('FatooraClient onboarding endpoints', () => {
     });
     expect(out.ok).toBe(true);
     expect(out.duplicate).toBe(true);
-    expect(out.clearedInvoiceBase64).toBe('UEsF');
+    expect(out.clearedInvoiceBase64).toBe(XML_B64);
   });
 
   it.each([208, 409])(

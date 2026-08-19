@@ -37,7 +37,7 @@ describe('buildPhase1Qr', () => {
     const b64 = buildPhase1Qr({
       sellerName: 'Bobs Records',
       vatNumber: '310122393500003',
-      timestamp: new Date(Date.UTC(2022, 3, 25, 15, 30)),
+      timestamp: '2022-04-25T15:30:00',
       totalWithVatHalalas: 100000,
       vatHalalas: 15000,
     });
@@ -51,7 +51,7 @@ describe('buildPhase1Qr', () => {
     const b64 = buildPhase1Qr({
       sellerName: 'Bobs Records',
       vatNumber: '310122393500003',
-      timestamp: new Date(Date.UTC(2022, 3, 25, 15, 30)),
+      timestamp: '2022-04-25T15:30:00',
       totalWithVatHalalas: 100000,
       vatHalalas: 15000,
     });
@@ -65,10 +65,34 @@ describe('buildPhase1Qr', () => {
     expect(tags.size).toBe(5);
   });
 
-  it('formatQrTimestamp strips milliseconds AND the Z', () => {
-    expect(formatQrTimestamp(new Date('2022-04-25T15:30:00.123Z'))).toBe(
+  it('formatQrTimestamp renders a Date as AST wall clock (UTC+3), never as bare UTC digits', () => {
+    // 10:00 UTC = 13:00 in Riyadh. Emitting '10:00:00' without a zone
+    // suffix would be read by ZATCA as 10:00 AST — three hours wrong.
+    expect(formatQrTimestamp(new Date('2022-04-25T10:00:00.123Z'))).toBe(
+      '2022-04-25T13:00:00',
+    );
+    // Same instant given with a +03:00 offset: identical AST output.
+    expect(formatQrTimestamp(new Date('2022-04-25T13:00:00+03:00'))).toBe(
+      '2022-04-25T13:00:00',
+    );
+  });
+
+  it('formatQrTimestamp passes a string through VERBATIM (byte-equal to the XML IssueDate/IssueTime)', () => {
+    expect(formatQrTimestamp('2022-04-25T15:30:00')).toBe(
       '2022-04-25T15:30:00',
     );
+  });
+
+  it('formatQrTimestamp rejects malformed strings and zone suffixes', () => {
+    for (const bad of [
+      '2022-04-25 15:30:00',
+      '2022-04-25T15:30:00Z',
+      '2022-04-25T15:30:00+03:00',
+      '2022-04-25T15:30',
+      'yesterday',
+    ]) {
+      expect(() => formatQrTimestamp(bad)).toThrow(TypeError);
+    }
   });
 
   it('Arabic seller name survives UTF-8 round trip', () => {
@@ -90,12 +114,12 @@ describe('buildPhase1Qr', () => {
       buildPhase2Qr({
         sellerName: 'S'.repeat(200),
         vatNumber: '310122393500003',
-        timestamp: new Date(Date.UTC(2022, 3, 25, 15, 30)),
+        timestamp: '2022-04-25T15:30:00',
         totalWithVatHalalas: 100000,
         vatHalalas: 15000,
         invoiceHashBase64: 'a'.repeat(44),
         signatureBase64: 'b'.repeat(96),
-        publicKeyBytes: new Uint8Array(88),
+        publicKeyBytes: fakeSpki(),
         certificateSignature: new Uint8Array(72),
       }),
     ).toThrow(RangeError);
@@ -137,12 +161,12 @@ describe('halalasToSar', () => {
 
 describe('buildPhase2Qr', () => {
   it('adds tags 6-7 as base64 STRINGS and 8-9 as RAW bytes', () => {
-    const publicKeyBytes = Uint8Array.from([4, 1, 2, 3]);
+    const publicKeyBytes = fakeSpki();
     const certificateSignature = Uint8Array.from([48, 68, 2, 32]);
     const b64 = buildPhase2Qr({
       sellerName: 'Bobs Records',
       vatNumber: '310122393500003',
-      timestamp: new Date(Date.UTC(2022, 3, 25, 15, 30)),
+      timestamp: '2022-04-25T15:30:00',
       totalWithVatHalalas: 100000,
       vatHalalas: 15000,
       invoiceHashBase64: 'aGFzaA==',
@@ -164,15 +188,53 @@ describe('buildPhase2Qr', () => {
     const b64 = buildPhase2Qr({
       sellerName: 'Bobs Records',
       vatNumber: '310122393500003',
-      timestamp: new Date(Date.UTC(2022, 3, 25, 15, 30)),
+      timestamp: '2022-04-25T15:30:00',
       totalWithVatHalalas: 100000,
       vatHalalas: 15000,
       invoiceHashBase64: 'aGFzaA==',
       signatureBase64: 'c2ln',
-      publicKeyBytes: Uint8Array.from([4, 1, 2, 3]),
+      publicKeyBytes: fakeSpki(),
     });
     const tags = decodeTlv(b64);
     expect(tags.size).toBe(8);
     expect(tags.has(9)).toBe(false);
   });
+
+  it('rejects tag-8 input that is not a full 88-byte DER SPKI', () => {
+    const base = {
+      sellerName: 'Bobs Records',
+      vatNumber: '310122393500003',
+      timestamp: '2022-04-25T15:30:00',
+      totalWithVatHalalas: 100000,
+      vatHalalas: 15000,
+      invoiceHashBase64: 'aGFzaA==',
+      signatureBase64: 'c2ln',
+    };
+    // Four arbitrary bytes — the case that recreated the tag-8 failure.
+    expect(() =>
+      buildPhase2Qr({ ...base, publicKeyBytes: Uint8Array.from([4, 1, 2, 3]) }),
+    ).toThrow(TypeError);
+    // The bare 65-byte EC point (the classic mistake — right key, wrong form).
+    const barePoint = new Uint8Array(65);
+    barePoint[0] = 0x04;
+    expect(() =>
+      buildPhase2Qr({ ...base, publicKeyBytes: barePoint }),
+    ).toThrow(TypeError);
+    // 88 bytes but not DER (no leading SEQUENCE tag).
+    expect(() =>
+      buildPhase2Qr({ ...base, publicKeyBytes: new Uint8Array(88) }),
+    ).toThrow(TypeError);
+    // Correct shape passes.
+    expect(() =>
+      buildPhase2Qr({ ...base, publicKeyBytes: fakeSpki() }),
+    ).not.toThrow();
+  });
 });
+
+/** 88 bytes shaped like a secp256k1 SPKI: DER SEQUENCE header + filler. */
+function fakeSpki(): Uint8Array {
+  const b = new Uint8Array(88);
+  b[0] = 0x30;
+  b[1] = 0x56;
+  return b;
+}
