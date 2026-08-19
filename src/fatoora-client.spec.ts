@@ -23,9 +23,12 @@ function stubFetch(status: number, body = '{}'): FetchArgs[] {
 
 const creds = { cert: 'TUlJQ1BUQ0NBZU9n', secret: 's3cr3t=' };
 /** A cleared-invoice stand-in that is REAL base64 of REAL XML. */
-const XML_B64 = Buffer.from('<?xml version="1.0"?><Invoice/>').toString(
-  'base64',
-);
+const XML_B64 = Buffer.from(
+  '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">' +
+    '<cbc:ID xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">INV-1</cbc:ID>' +
+    '</Invoice>',
+).toString('base64');
 const invoice = {
   invoiceHash: 'vLGQoYNoM3tf1XAxKpoNTSz/8pkdidXy47HWh0VQmu8=',
   uuid: '8e6000cf-1a98-4174-b3e7-b5d5954bc10d',
@@ -495,6 +498,49 @@ describe('FatooraClient onboarding endpoints', () => {
     expect(out.clearedInvoiceBase64).toBe(XML_B64);
   });
 
+  it('clearStandard: CLEARED contradicted by validationResults fails closed', async () => {
+    // Archiving an invoice ZATCA's own body says is invalid — as the
+    // LEGAL copy — is the worst outcome this call can produce.
+    for (const vr of [
+      { status: 'ERROR', errorMessages: [{ code: 'BR-KSA-X' }] },
+      { status: 'PASS', erroMessages: [{ code: 'BR-KSA-Y' }] }, // typo spelling
+      { status: 'ERROR', errorMessages: [] }, // status alone still counts
+    ]) {
+      stub(
+        200,
+        JSON.stringify({
+          clearanceStatus: 'CLEARED',
+          clearedInvoice: XML_B64,
+          validationResults: vr,
+        }),
+      );
+      const out = await new FatooraClient().clearStandard({
+        creds,
+        invoiceHash: invoice.invoiceHash,
+        uuid: invoice.uuid,
+        invoiceXmlBase64: invoice.invoiceXmlBase64,
+      });
+      expect(out.ok).toBe(false);
+    }
+
+    // A PASS block alongside CLEARED is still a success.
+    stub(
+      200,
+      JSON.stringify({
+        clearanceStatus: 'CLEARED',
+        clearedInvoice: XML_B64,
+        validationResults: { status: 'PASS', errorMessages: [] },
+      }),
+    );
+    const good = await new FatooraClient().clearStandard({
+      creds,
+      invoiceHash: invoice.invoiceHash,
+      uuid: invoice.uuid,
+      invoiceXmlBase64: invoice.invoiceXmlBase64,
+    });
+    expect(good.ok).toBe(true);
+  });
+
   it('clearStandard: CLEARED with a clearedInvoice that is not base64 XML fails closed', async () => {
     // The stamped copy becomes the LEGAL invoice we archive and hand to
     // the buyer — garbage must never be filed as a legal document.
@@ -502,6 +548,10 @@ describe('FatooraClient onboarding endpoints', () => {
       '*** not base64 ***',
       'AAAA', // canonical base64, but the bytes are not XML
       'PD94bWw', // non-canonical (unpadded) even though it decodes
+      Buffer.from('<').toString('base64'), // a single '<' is not a document
+      Buffer.from('<?xml version="1.0"?>').toString('base64'), // declaration only
+      Buffer.from('<Invoice/>').toString('base64'), // well-formed, but no UBL
+      Buffer.from('<html><body>oops</body></html>').toString('base64'), // wrong root
     ]) {
       stub(
         200,

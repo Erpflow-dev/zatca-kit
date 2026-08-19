@@ -138,6 +138,16 @@ describe('generateCsr', () => {
     ['invoiceType reserved digit set', { invoiceType: '0111' }],
     ['invoiceType reserved digit set 2', { invoiceType: '1010' }],
     ['serialNumber missing the 1-|2-|3- shape', { serialNumber: 'PAX-A920' }],
+    // A trailing `.+` used to swallow extra pipe components — the serial
+    // is baked into the CSID, so a malformed one is unfixable later.
+    [
+      'serialNumber with a fourth component',
+      { serialNumber: '1-POS|2-A920|3-unit-id|4-extra' },
+    ],
+    [
+      'serialNumber with an empty component',
+      { serialNumber: '1-POS|2-|3-unit-id' },
+    ],
     ['countryName not ISO2', { countryName: 'KSA' }],
     ['empty required field', { organizationName: '' }],
   ])('rejects %s', (_name, patch) => {

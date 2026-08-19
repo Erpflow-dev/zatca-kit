@@ -1,3 +1,4 @@
+import { createHash, createSign, generateKeyPairSync } from 'node:crypto';
 import {
   buildPhase1Qr,
   buildPhase2Qr,
@@ -95,6 +96,27 @@ describe('buildPhase1Qr', () => {
     }
   });
 
+  it('formatQrTimestamp rejects well-shaped strings that are not real instants', () => {
+    // Right shape, impossible calendar values — a regex alone passes these.
+    for (const bad of [
+      '2026-99-99T99:99:99',
+      '2026-02-30T10:00:00',
+      '2026-13-01T10:00:00',
+      '2026-01-01T24:00:00',
+      '2026-01-01T10:60:00',
+    ]) {
+      expect(() => formatQrTimestamp(bad)).toThrow(TypeError);
+    }
+    // Leap day in a real leap year still passes.
+    expect(formatQrTimestamp('2028-02-29T10:00:00')).toBe(
+      '2028-02-29T10:00:00',
+    );
+  });
+
+  it('formatQrTimestamp rejects an Invalid Date instead of throwing RangeError deep inside', () => {
+    expect(() => formatQrTimestamp(new Date('nope'))).toThrow(TypeError);
+  });
+
   it('Arabic seller name survives UTF-8 round trip', () => {
     const name = 'سوبرماركت التجربة';
     const b64 = buildPhase1Qr({
@@ -117,9 +139,9 @@ describe('buildPhase1Qr', () => {
         timestamp: '2022-04-25T15:30:00',
         totalWithVatHalalas: 100000,
         vatHalalas: 15000,
-        invoiceHashBase64: 'a'.repeat(44),
-        signatureBase64: 'b'.repeat(96),
-        publicKeyBytes: fakeSpki(),
+        invoiceHashBase64: realHashB64(),
+        signatureBase64: realSignatureB64(),
+        publicKeyBytes: realSpki(),
         certificateSignature: new Uint8Array(72),
       }),
     ).toThrow(RangeError);
@@ -161,24 +183,26 @@ describe('halalasToSar', () => {
 
 describe('buildPhase2Qr', () => {
   it('adds tags 6-7 as base64 STRINGS and 8-9 as RAW bytes', () => {
-    const publicKeyBytes = fakeSpki();
+    const publicKeyBytes = realSpki();
     const certificateSignature = Uint8Array.from([48, 68, 2, 32]);
+    const invoiceHashBase64 = realHashB64();
+    const signatureBase64 = realSignatureB64();
     const b64 = buildPhase2Qr({
       sellerName: 'Bobs Records',
       vatNumber: '310122393500003',
       timestamp: '2022-04-25T15:30:00',
       totalWithVatHalalas: 100000,
       vatHalalas: 15000,
-      invoiceHashBase64: 'aGFzaA==',
-      signatureBase64: 'c2ln',
+      invoiceHashBase64,
+      signatureBase64,
       publicKeyBytes,
       certificateSignature,
     });
     const tags = decodeTlv(b64);
     expect(tags.size).toBe(9);
     // 6-7: the base64 text itself is the value…
-    expect(tags.get(6)?.toString('utf8')).toBe('aGFzaA==');
-    expect(tags.get(7)?.toString('utf8')).toBe('c2ln');
+    expect(tags.get(6)?.toString('utf8')).toBe(invoiceHashBase64);
+    expect(tags.get(7)?.toString('utf8')).toBe(signatureBase64);
     // …8-9: raw bytes, NOT base64 text (the documented asymmetry).
     expect([...(tags.get(8) ?? [])]).toEqual([...publicKeyBytes]);
     expect([...(tags.get(9) ?? [])]).toEqual([...certificateSignature]);
@@ -191,9 +215,9 @@ describe('buildPhase2Qr', () => {
       timestamp: '2022-04-25T15:30:00',
       totalWithVatHalalas: 100000,
       vatHalalas: 15000,
-      invoiceHashBase64: 'aGFzaA==',
-      signatureBase64: 'c2ln',
-      publicKeyBytes: fakeSpki(),
+      invoiceHashBase64: realHashB64(),
+      signatureBase64: realSignatureB64(),
+      publicKeyBytes: realSpki(),
     });
     const tags = decodeTlv(b64);
     expect(tags.size).toBe(8);
@@ -207,8 +231,8 @@ describe('buildPhase2Qr', () => {
       timestamp: '2022-04-25T15:30:00',
       totalWithVatHalalas: 100000,
       vatHalalas: 15000,
-      invoiceHashBase64: 'aGFzaA==',
-      signatureBase64: 'c2ln',
+      invoiceHashBase64: realHashB64(),
+      signatureBase64: realSignatureB64(),
     };
     // Four arbitrary bytes — the case that recreated the tag-8 failure.
     expect(() =>
@@ -224,17 +248,88 @@ describe('buildPhase2Qr', () => {
     expect(() =>
       buildPhase2Qr({ ...base, publicKeyBytes: new Uint8Array(88) }),
     ).toThrow(TypeError);
-    // Correct shape passes.
+    // THE hole a length+first-byte check cannot see: 88 bytes that open
+    // with a DER SEQUENCE header and are otherwise filler. Only actually
+    // parsing the key rejects this.
+    const fakeSpki = new Uint8Array(88);
+    fakeSpki[0] = 0x30;
+    fakeSpki[1] = 0x56;
     expect(() =>
-      buildPhase2Qr({ ...base, publicKeyBytes: fakeSpki() }),
+      buildPhase2Qr({ ...base, publicKeyBytes: fakeSpki }),
+    ).toThrow(TypeError);
+    // A real key on the WRONG curve is still wrong (P-256 ≠ secp256k1).
+    const p256 = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+      .publicKey.export({ type: 'spki', format: 'der' });
+    expect(() => buildPhase2Qr({ ...base, publicKeyBytes: p256 })).toThrow(
+      /secp256k1/,
+    );
+    // The genuine article passes.
+    expect(() =>
+      buildPhase2Qr({ ...base, publicKeyBytes: realSpki() }),
+    ).not.toThrow();
+  });
+
+  it('rejects tag-6/7 payloads that are not a real hash and DER signature', () => {
+    const base = {
+      sellerName: 'Bobs Records',
+      vatNumber: '310122393500003',
+      timestamp: '2022-04-25T15:30:00',
+      totalWithVatHalalas: 100000,
+      vatHalalas: 15000,
+      publicKeyBytes: realSpki(),
+    };
+    const goodHash = realHashB64();
+    const goodSig = realSignatureB64();
+
+    // Tag 6 must decode canonically to 32 SHA-256 bytes.
+    for (const badHash of [
+      'not-base64!!!',
+      'QUJD', // valid base64, 3 bytes
+      'a'.repeat(44), // 44 chars → 33 bytes, the old fixture's shape
+      goodHash.slice(0, -1), // broken padding
+    ]) {
+      expect(() =>
+        buildPhase2Qr({ ...base, invoiceHashBase64: badHash, signatureBase64: goodSig }),
+      ).toThrow(TypeError);
+    }
+
+    // Tag 7 must decode to a DER ECDSA SEQUENCE of two INTEGERs.
+    for (const badSig of [
+      'not-base64!!!',
+      'c2ln', // 3 arbitrary bytes
+      'b'.repeat(96), // right length, wrong structure
+      Buffer.from([0x30, 0x06, 0x02, 0x01, 0x01]).toString('base64'), // truncated
+    ]) {
+      expect(() =>
+        buildPhase2Qr({ ...base, invoiceHashBase64: goodHash, signatureBase64: badSig }),
+      ).toThrow(TypeError);
+    }
+
+    expect(() =>
+      buildPhase2Qr({ ...base, invoiceHashBase64: goodHash, signatureBase64: goodSig }),
     ).not.toThrow();
   });
 });
 
-/** 88 bytes shaped like a secp256k1 SPKI: DER SEQUENCE header + filler. */
-function fakeSpki(): Uint8Array {
-  const b = new Uint8Array(88);
-  b[0] = 0x30;
-  b[1] = 0x56;
-  return b;
+/**
+ * A REAL secp256k1 SPKI — the old fixture was 88 bytes of zeros behind a
+ * DER header, which is exactly the "fake key passes" hole this suite now
+ * guards.
+ */
+function realSpki(): Uint8Array {
+  const { publicKey } = generateKeyPairSync('ec', { namedCurve: 'secp256k1' });
+  return publicKey.export({ type: 'spki', format: 'der' });
+}
+
+/** base64 of a genuine 32-byte SHA-256 digest (tag 6). */
+function realHashB64(): string {
+  return createHash('sha256').update('invoice').digest('base64');
+}
+
+/** base64 of a genuine DER ECDSA signature (tag 7). */
+function realSignatureB64(): string {
+  const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'secp256k1' });
+  const signer = createSign('sha256');
+  signer.update('invoice');
+  return signer.sign(privateKey).toString('base64');
 }

@@ -139,7 +139,11 @@ export function validateCsrConfig(config: CsrConfig): void {
       throw new CsrConfigError(`${field} is required`);
     }
   }
-  if (!/^1-.+\|2-.+\|3-.+$/.test(config.serialNumber)) {
+  // EXACTLY three pipe-delimited components. `.+` for the last one would
+  // swallow '|4-anything', letting a malformed EGS serial through — and
+  // the serial is baked into the CSID, so it is not fixable after
+  // onboarding.
+  if (!/^1-[^|]+\|2-[^|]+\|3-[^|]+$/.test(config.serialNumber)) {
     throw new CsrConfigError(
       "serialNumber must be '1-<solution>|2-<model>|3-<uuid>'",
     );

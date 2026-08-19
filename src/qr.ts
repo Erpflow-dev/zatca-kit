@@ -22,6 +22,9 @@
  * touches floating point.
  */
 
+import { createPublicKey } from 'node:crypto';
+import { decodeBase64Strict } from './base64';
+
 export interface Phase1Fields {
   sellerName: string;
   vatNumber: string;
@@ -80,7 +83,25 @@ export function formatQrTimestamp(date: Date | string): string {
           `exactly the XML IssueDate + 'T' + IssueTime), got '${date}'`,
       );
     }
+    // Shape is not existence: '2026-99-99T99:99:99' and '2026-02-30T…'
+    // both match the pattern. Round-trip through the calendar so only
+    // real instants reach tag 3.
+    const [y, mo, d, h, mi, s] = date.split(/[-T:]/).map(Number);
+    const probe = new Date(Date.UTC(y, mo - 1, d, h, mi, s));
+    if (
+      probe.getUTCFullYear() !== y ||
+      probe.getUTCMonth() !== mo - 1 ||
+      probe.getUTCDate() !== d ||
+      probe.getUTCHours() !== h ||
+      probe.getUTCMinutes() !== mi ||
+      probe.getUTCSeconds() !== s
+    ) {
+      throw new TypeError(`timestamp '${date}' is not a real date and time`);
+    }
     return date;
+  }
+  if (Number.isNaN(date.getTime())) {
+    throw new TypeError('timestamp Date is Invalid Date');
   }
   // AST = UTC+3, permanently (Saudi Arabia has no DST).
   const ast = new Date(date.getTime() + 3 * 3_600_000);
@@ -143,22 +164,83 @@ export function buildPhase1Qr(fields: Phase1Fields): string {
   return encodeQr(phase1Tlvs(fields));
 }
 
+/**
+ * Tag 8 must be the COMPLETE DER SubjectPublicKeyInfo for the secp256k1
+ * CSID key — 88 bytes for that curve. Length and a leading 0x30 only
+ * prove "88 bytes of something DER-shaped"; the compliance failure this
+ * guards against is a WRONG KEY, so the bytes are actually parsed and
+ * the curve checked. (The bare 65-byte point is the classic mistake.)
+ */
+function assertSecp256k1Spki(bytes: Uint8Array): void {
+  let namedCurve: string | undefined;
+  try {
+    namedCurve = createPublicKey({
+      key: Buffer.from(bytes),
+      format: 'der',
+      type: 'spki',
+    }).asymmetricKeyDetails?.namedCurve;
+  } catch (err) {
+    throw new TypeError(
+      `publicKeyBytes (${bytes.length} bytes) is not a parseable DER ` +
+        `SubjectPublicKeyInfo: ${(err as Error).message}`,
+    );
+  }
+  if (namedCurve !== 'secp256k1') {
+    throw new TypeError(
+      `publicKeyBytes must be a secp256k1 public key, got ` +
+        `${namedCurve ?? 'a non-EC key'}`,
+    );
+  }
+}
+
+/**
+ * DER ECDSA signature: `SEQUENCE { INTEGER r, INTEGER s }`. Tag 7 carries
+ * the base64 of exactly these bytes; anything else is a signature ZATCA
+ * cannot verify, so it must never reach a printed receipt.
+ */
+function isDerEcdsaSignature(sig: Buffer): boolean {
+  if (sig.length < 8 || sig[0] !== 0x30) return false;
+  const seqLen = sig[1];
+  // ECDSA-P256K signatures are ~70-72 bytes: always DER short form.
+  if (seqLen & 0x80 || seqLen !== sig.length - 2) return false;
+  let off = 2;
+  for (let i = 0; i < 2; i += 1) {
+    if (sig[off] !== 0x02) return false; // INTEGER tag
+    const len = sig[off + 1];
+    if (len === 0 || len & 0x80) return false;
+    off += 2 + len;
+    if (off > sig.length) return false;
+  }
+  return off === sig.length;
+}
+
 /** Phase-2 (integration) QR payload — BR-KSA-27. Tag 9 rides only when
  * provided (simplified invoices); standard invoices omit it. */
 export function buildPhase2Qr(fields: Phase2Fields): string {
-  // Tag 8 must be the COMPLETE DER SubjectPublicKeyInfo — 88 bytes for
-  // secp256k1, starting with a DER SEQUENCE (0x30). Accepting anything
-  // shorter (the bare 65-byte point is the classic mistake) rebuilds the
-  // exact tag-8 compliance failure this field's docs warn about, so it
-  // fails here instead of inside ZATCA's validator.
-  const pk = fields.publicKeyBytes;
-  if (pk.length !== 88 || pk[0] !== 0x30) {
+  // Tags 6-8 are the cryptographic proof a verifier re-checks offline.
+  // Each is validated for what it must BE, not merely that it is a
+  // non-empty string: a QR that carries garbage here prints fine and
+  // fails at the auditor's scanner, long after the sale.
+  const hash = decodeBase64Strict(
+    fields.invoiceHashBase64,
+    'invoiceHashBase64',
+  );
+  if (hash.length !== 32) {
     throw new TypeError(
-      `publicKeyBytes must be the full 88-byte DER SubjectPublicKeyInfo ` +
-        `for secp256k1 (starts 0x30), got ${pk.length} byte(s)` +
-        (pk.length > 0 ? ` starting 0x${pk[0].toString(16)}` : ''),
+      `invoiceHashBase64 must decode to 32 SHA-256 bytes, got ${hash.length}`,
     );
   }
+  const signature = decodeBase64Strict(
+    fields.signatureBase64,
+    'signatureBase64',
+  );
+  if (!isDerEcdsaSignature(signature)) {
+    throw new TypeError(
+      `signatureBase64 must decode to a DER ECDSA signature ` +
+        `(SEQUENCE of two INTEGERs), got ${signature.length} bytes`,
+    );
+  }
+  assertSecp256k1Spki(fields.publicKeyBytes);
   return encodeQr([
     ...phase1Tlvs(fields),
     tlv(6, utf8(fields.invoiceHashBase64)),

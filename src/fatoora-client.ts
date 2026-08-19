@@ -1,5 +1,29 @@
 import { decodeBase64Strict } from './base64';
 
+/**
+ * The validation block ZATCA attaches to reporting, clearance AND
+ * compliance answers. Both spellings of the error array exist in the
+ * wild: the OpenAPI files say `erroMessages`, the live service has sent
+ * `errorMessages`.
+ */
+interface ValidationResultsBody {
+  status?: string;
+  errorMessages?: unknown[];
+  erroMessages?: unknown[];
+}
+
+/**
+ * Does this validation block contradict a success disposition? Used to
+ * refuse REPORTED/CLEARED whenever the SAME response says the invoice
+ * failed. The spellings MERGE — coalescing would let an empty array in
+ * one spelling hide a populated array in the other.
+ */
+function contradictsSuccess(vr?: ValidationResultsBody): boolean {
+  if (vr == null) return false;
+  const errors = [...(vr.errorMessages ?? []), ...(vr.erroMessages ?? [])];
+  return String(vr.status ?? '').toUpperCase() === 'ERROR' || errors.length > 0;
+}
+
 export interface FatooraCredentials {
   /**
    * The CSID `binarySecurityToken` exactly as ZATCA returned it. It is
@@ -180,25 +204,12 @@ export class FatooraClient {
     // top-level disposition claims.
     const parsed = this.tryJson<{
       reportingStatus?: string;
-      validationResults?: {
-        status?: string;
-        errorMessages?: unknown[];
-        erroMessages?: unknown[];
-      };
+      validationResults?: ValidationResultsBody;
     }>(res.body);
-    const vr = parsed?.validationResults;
-    const vrErrors = [
-      ...(vr?.errorMessages ?? []),
-      ...(vr?.erroMessages ?? []),
-    ];
-    const contradicted =
-      vr != null &&
-      (String(vr.status ?? '').toUpperCase() === 'ERROR' ||
-        vrErrors.length > 0);
     const reported =
       (res.status === 200 || res.status === 202) &&
       parsed?.reportingStatus === 'REPORTED' &&
-      !contradicted;
+      !contradictsSuccess(parsed?.validationResults);
     return {
       ok: reported || duplicate,
       rejected: res.status === 400,
@@ -247,14 +258,19 @@ export class FatooraClient {
     const parsed = this.tryJson<{
       clearanceStatus?: string;
       clearedInvoice?: string;
+      validationResults?: ValidationResultsBody;
     }>(res.body);
     // The stamped copy is about to become the LEGAL invoice we archive
     // and hand to the buyer — "non-empty string" is not evidence it is
-    // one. It must be canonical base64 whose decoded bytes are XML;
-    // `*** not base64 ***` must never be filed as a legal document.
+    // one. It must be canonical base64 that decodes to an actual UBL
+    // document, and the SAME body must not contradict CLEARED with a
+    // failed validationResults block (clearance answers carry one, and
+    // an invalid invoice archived as the legal copy is the worst
+    // possible outcome of this call).
     const cleared =
       ((res.status >= 200 && res.status < 300) || res.status === 409) &&
       parsed?.clearanceStatus === 'CLEARED' &&
+      !contradictsSuccess(parsed?.validationResults) &&
       typeof parsed?.clearedInvoice === 'string' &&
       this.isBase64Xml(parsed.clearedInvoice);
     return {
@@ -439,18 +455,45 @@ export class FatooraClient {
   }
 
   /**
-   * Is this canonical base64 whose decoded bytes are an XML document?
-   * (UTF-8 BOM tolerated; the decoded text must start with `<`.) Used to
-   * vet ZATCA's `clearedInvoice` before it is declared the legal copy.
+   * Is this canonical base64 of an actual UBL invoice document? A
+   * leading `<` proves nothing — base64 of the single byte `<` would
+   * pass that, and this string is about to be archived as the LEGAL
+   * copy. Three pieces of evidence are required:
+   *   1. canonical base64 (Node's decoder alone accepts garbage);
+   *   2. a root element whose local name is one clearance returns —
+   *      `Invoice` for ZATCA today, with UBL's `CreditNote`/`DebitNote`
+   *      accepted so a document-type change can never turn a genuinely
+   *      cleared invoice into a false rejection;
+   *   3. the UBL 2.1 namespace, which every conformant document MUST
+   *      declare for that root — this is what separates a real invoice
+   *      from a well-formed `<Invoice/>`.
    */
   private isBase64Xml(value: string): boolean {
+    let text: string;
     try {
-      const decoded = decodeBase64Strict(value, 'clearedInvoice');
-      const text = decoded.toString('utf8').replace(/^﻿/, '').trimStart();
-      return text.startsWith('<');
+      text = decodeBase64Strict(value, 'clearedInvoice')
+        .toString('utf8')
+        .replace(/^﻿/, '')
+        .trimStart();
     } catch {
       return false;
     }
+    // Skip an XML declaration plus any leading comments / processing
+    // instructions so the root element is what we actually inspect.
+    let body = text;
+    for (;;) {
+      const isComment = body.startsWith('<!--');
+      if (!isComment && !body.startsWith('<?')) break;
+      const close = body.indexOf(isComment ? '-->' : '?>');
+      if (close === -1) return false;
+      body = body.slice(close + (isComment ? 3 : 2)).trimStart();
+    }
+    const root = /^<(?:[A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]*)[\s/>]/.exec(body);
+    if (root === null) return false;
+    if (!['Invoice', 'CreditNote', 'DebitNote'].includes(root[1])) return false;
+    return body.includes(
+      'urn:oasis:names:specification:ubl:schema:xsd:',
+    );
   }
 
   private tryJson<T>(body: string): T | null {
