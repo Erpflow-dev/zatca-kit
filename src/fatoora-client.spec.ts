@@ -541,6 +541,46 @@ describe('FatooraClient onboarding endpoints', () => {
     expect(good.ok).toBe(true);
   });
 
+  it('a validationResults block must AFFIRM success, not merely avoid ERROR', async () => {
+    // Only checking for the literal 'ERROR' let every other value pass.
+    for (const vr of [
+      'PASS', // a STRING, not the documented object
+      { status: 'UNKNOWN', errorMessages: [] },
+      { status: '', errorMessages: [] },
+      { errorMessages: [] }, // no status at all
+      ['PASS'],
+      42,
+    ]) {
+      stub(
+        200,
+        JSON.stringify({ reportingStatus: 'REPORTED', validationResults: vr }),
+      );
+      const rep = await new FatooraClient().reportSimplified({
+        creds,
+        invoiceHash: invoice.invoiceHash,
+        uuid: invoice.uuid,
+        invoiceXmlBase64: invoice.invoiceXmlBase64,
+      });
+      expect(rep.ok).toBe(false);
+    }
+
+    // WARNING is a documented pass-with-warnings verdict.
+    stub(
+      200,
+      JSON.stringify({
+        reportingStatus: 'REPORTED',
+        validationResults: { status: 'WARNING', errorMessages: [] },
+      }),
+    );
+    const warned = await new FatooraClient().reportSimplified({
+      creds,
+      invoiceHash: invoice.invoiceHash,
+      uuid: invoice.uuid,
+      invoiceXmlBase64: invoice.invoiceXmlBase64,
+    });
+    expect(warned.ok).toBe(true);
+  });
+
   it('malformed validationResults arrays fail closed instead of crashing', async () => {
     // `errorMessages: {}` used to hit a spread of a non-iterable and
     // throw TypeError out of the client, taking the caller down with it.
@@ -599,6 +639,20 @@ describe('FatooraClient onboarding endpoints', () => {
       // Namespace present, but only on a CHILD; the root is in none.
       Buffer.from(
         '<Invoice><x xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"/></Invoice>',
+      ).toString('base64'),
+      // CDATA at the TOP level — character data outside the root.
+      Buffer.from(
+        `<![CDATA[x]]><Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"/>`,
+      ).toString('base64'),
+      // UNDEFINED entity: fatal to any real parser.
+      Buffer.from(
+        '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">' +
+          '<cbc:ID>&nbsp;</cbc:ID></Invoice>',
+      ).toString('base64'),
+      // The namespace only LOOKS declared: it sits inside another
+      // attribute's value, so the root is in no namespace at all.
+      Buffer.from(
+        `<Invoice note=" xmlns='urn:oasis:names:specification:ubl:schema:xsd:Invoice-2'"/>`,
       ).toString('base64'),
       // Mismatched closing tag.
       Buffer.from(

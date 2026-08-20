@@ -156,6 +156,15 @@ function phase1Tlvs(f: Phase1Fields): Buffer[] {
       );
     }
   }
+  // Tag 4 is the VAT-INCLUSIVE total, so tag 5 is a component of it.
+  // Checking each in isolation let SAR 1.01 of VAT ride on a SAR 1.00
+  // invoice — arithmetically impossible, and an auditor's first check.
+  if (f.vatHalalas > f.totalWithVatHalalas) {
+    throw new TypeError(
+      `vatHalalas (${f.vatHalalas}) cannot exceed totalWithVatHalalas ` +
+        `(${f.totalWithVatHalalas}) — tag 4 INCLUDES the VAT of tag 5`,
+    );
+  }
   return [
     tlv(1, utf8(f.sellerName)),
     tlv(2, utf8(f.vatNumber)),
@@ -255,6 +264,18 @@ function isDerEcdsaSignature(sig: Buffer): boolean {
     if (sig[off] !== 0x02) return false; // INTEGER tag
     const len = sig[off + 1];
     if (len === 0 || len & 0x80) return false;
+    const value = sig.subarray(off + 2, off + 2 + len);
+    if (value.length !== len) return false;
+    // r and s must be positive integers in [1, n-1]. A well-formed
+    // SEQUENCE of two INTEGERs is not enough: `30 06 02 01 00 02 01 00`
+    // is r=0,s=0, which no signing operation can ever produce.
+    if (value[0] & 0x80) return false; // negative
+    if (value.every((b) => b === 0)) return false; // zero
+    // DER requires minimal encoding: a leading 0x00 only to clear a set
+    // high bit.
+    if (value.length > 1 && value[0] === 0x00 && !(value[1] & 0x80)) {
+      return false;
+    }
     off += 2 + len;
     if (off > sig.length) return false;
   }

@@ -18,14 +18,22 @@ interface ValidationResultsBody {
  * failed. The spellings MERGE — coalescing would let an empty array in
  * one spelling hide a populated array in the other.
  */
-function contradictsSuccess(vr?: ValidationResultsBody): boolean {
-  if (vr == null) return false;
-  if (String(vr.status ?? '').toUpperCase() === 'ERROR') return true;
-  for (const field of [vr.errorMessages, vr.erroMessages]) {
+function contradictsSuccess(vr?: unknown): boolean {
+  if (vr == null) return false; // absent block: the disposition stands alone
+  // Present but not an object (`validationResults: "PASS"`) is a verdict
+  // we cannot read. Trusting the top-level disposition over an unreadable
+  // verdict is failing OPEN.
+  if (typeof vr !== 'object' || Array.isArray(vr)) return true;
+  const block = vr as ValidationResultsBody;
+  // A block that is present must AFFIRMATIVELY say it passed. Checking
+  // only for the literal 'ERROR' let every other value through —
+  // 'UNKNOWN', a typo, a future status, or no status at all.
+  const status = String(block.status ?? '').toUpperCase();
+  if (status !== 'PASS' && status !== 'WARNING') return true;
+  for (const field of [block.errorMessages, block.erroMessages]) {
     if (field == null) continue;
-    // A non-array here is a body we do not understand. Spreading it
-    // would throw ("not iterable") and take the whole call down; the
-    // safe reading of an unparseable result is "not proven successful".
+    // A non-array here is also unreadable. Spreading it would throw
+    // ("not iterable") and take the whole call down.
     if (!Array.isArray(field)) return true;
     if (field.length > 0) return true;
   }
@@ -46,16 +54,20 @@ const UBL_NAMESPACES: Record<string, string> = {
  * Truncated documents (the common corruption) leave the stack non-empty
  * and are rejected. Dependency-free by design: the kit ships no parser.
  */
-function scanXmlRoot(text: string): { name: string; attrs: string } | null {
+function scanXmlRoot(
+  text: string,
+): { name: string; attributes: Map<string, string> } | null {
   const stack: string[] = [];
-  let root: { name: string; attrs: string } | null = null;
+  let root: { name: string; attributes: Map<string, string> } | null = null;
   let i = 0;
   while (i < text.length) {
     if (text[i] !== '<') {
       const next = text.indexOf('<', i);
       const chunk = text.slice(i, next === -1 ? text.length : next);
-      // Character data outside the root element is not well-formed.
+      // Character data outside the root element is not well-formed, and
+      // inside it every '&' must open a defined reference.
       if (stack.length === 0 && chunk.trim() !== '') return null;
+      if (stack.length > 0 && !entitiesAreDefined(chunk)) return null;
       if (next === -1) break;
       i = next;
       continue;
@@ -67,6 +79,10 @@ function scanXmlRoot(text: string): { name: string; attrs: string } | null {
       continue;
     }
     if (text.startsWith('<![CDATA[', i)) {
+      // CDATA is character data: legal INSIDE an element, never at the
+      // top level. Skipping it unconditionally accepted documents no
+      // parser would.
+      if (stack.length === 0) return null;
       const end = text.indexOf(']]>', i);
       if (end === -1) return null;
       i = end + 3;
@@ -106,13 +122,63 @@ function scanXmlRoot(text: string): { name: string; attrs: string } | null {
       selfClosing ? inner.slice(0, -1) : inner,
     );
     if (parsed === null) return null;
-    const [, name, attrs] = parsed;
+    const [, name, rawAttrs] = parsed;
     if (stack.length === 0 && root !== null) return null; // a second root
-    if (root === null) root = { name, attrs };
+    if (root === null) {
+      const attributes = parseAttributes(rawAttrs);
+      if (attributes === null) return null;
+      root = { name, attributes };
+    } else if (parseAttributes(rawAttrs) === null) {
+      return null;
+    }
     if (!selfClosing) stack.push(name);
     i = j + 1;
   }
   return stack.length === 0 ? root : null;
+}
+
+/**
+ * Without a DTD the only legal references are the five predefined
+ * entities and numeric character references. `&foo;` is a fatal error to
+ * a real parser, so a document carrying one is not the legal invoice.
+ */
+function entitiesAreDefined(text: string): boolean {
+  return !text
+    .replace(/&(?:lt|gt|amp|apos|quot|#\d+|#x[0-9A-Fa-f]+);/g, '')
+    .includes('&');
+}
+
+/**
+ * Parse an element's attributes into name → value. Scanning the RAW
+ * attribute text with a regex was the hole: an ordinary attribute whose
+ * VALUE contains `xmlns='urn:…:Invoice-2'` looked like a namespace
+ * declaration on the element itself.
+ */
+function parseAttributes(raw: string): Map<string, string> | null {
+  const attributes = new Map<string, string>();
+  let i = 0;
+  while (i < raw.length) {
+    if (/\s/.test(raw[i])) {
+      i += 1;
+      continue;
+    }
+    const name = /^([A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)\s*=\s*/.exec(
+      raw.slice(i),
+    );
+    if (name === null) return null;
+    i += name[0].length;
+    const quote = raw[i];
+    if (quote !== '"' && quote !== "'") return null;
+    const end = raw.indexOf(quote, i + 1);
+    if (end === -1) return null;
+    const value = raw.slice(i + 1, end);
+    // '<' is never legal raw inside an attribute value.
+    if (value.includes('<') || !entitiesAreDefined(value)) return null;
+    if (attributes.has(name[1])) return null; // duplicate attribute
+    attributes.set(name[1], value);
+    i = end + 1;
+  }
+  return attributes;
 }
 
 export interface FatooraCredentials {
@@ -579,13 +645,14 @@ export class FatooraClient {
     const expectedNs = UBL_NAMESPACES[localName];
     if (expectedNs === undefined) return false;
 
-    // The root must be IN that namespace — a substring match anywhere in
-    // the document would accept `…:xsd:Order-2` or a namespace that only
-    // appears on some unrelated child element.
-    const declaration = new RegExp(
-      `(?:^|\\s)xmlns${prefix === '' ? '' : ':' + prefix}\\s*=\\s*("|')([^"']*)\\1`,
-    ).exec(root.attrs);
-    return declaration !== null && declaration[2] === expectedNs;
+    // The root must be IN that namespace, read from its OWN parsed
+    // declaration — not matched anywhere in the text, which accepted
+    // `…:xsd:Order-2`, a namespace on a child, or one hidden inside
+    // another attribute's value.
+    return (
+      root.attributes.get(prefix === '' ? 'xmlns' : `xmlns:${prefix}`) ===
+      expectedNs
+    );
   }
 
   private tryJson<T>(body: string): T | null {

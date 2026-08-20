@@ -33,10 +33,10 @@ export interface CsrConfig {
   /** ISO 3166-1 alpha-2, 'SA' for us. */
   countryName: string;
   /**
-   * Set when this EGS belongs to a VAT GROUP member. ZATCA then requires
-   * `organizationUnitName` to be that member's own 10-digit TIN. The
-   * 15-digit VAT number does not reveal group membership, so only the
-   * caller can say.
+   * Force the VAT-GROUP rule on (organizationUnitName must be the
+   * member's 10-digit TIN). Normally unnecessary: a VAT number whose
+   * 11th digit is '1' is detected as a group registration automatically.
+   * This only ADDS to that detection, never disables it.
    */
   vatGroup?: boolean;
   /**
@@ -197,12 +197,15 @@ export function validateCsrConfig(config: CsrConfig): void {
   }
   // ZATCA rule for VAT GROUP members: the organizational unit must carry
   // the group member's own 10-digit TIN, not a free-text branch name.
-  // Group membership is not derivable from the 15-digit VAT number, so
-  // the caller declares it — guessing would reject legitimate branches.
-  if (
-    config.vatGroup === true &&
-    !/^\d{10}$/.test(config.organizationUnitName)
-  ) {
+  // Membership IS derivable — the 11th digit of the VAT number is '1'
+  // for a group registration (ZATCA's CSR field table). An earlier
+  // version made this an opt-in flag, so the rule only applied when the
+  // caller already knew about it; the flag now only ADDS to the derived
+  // answer, and a group EGS can no longer be onboarded with a branch
+  // name in OU by forgetting it.
+  const isVatGroup =
+    config.vatGroup === true || config.organizationIdentifier[10] === '1';
+  if (isVatGroup && !/^\d{10}$/.test(config.organizationUnitName)) {
     throw new CsrConfigError(
       'organizationUnitName must be the 10-digit TIN of the VAT-group ' +
         `member when vatGroup is set, got '${config.organizationUnitName}'`,

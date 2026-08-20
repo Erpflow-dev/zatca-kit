@@ -395,6 +395,14 @@ describe('buildPhase2Qr cryptographic linkage', () => {
       Uint8Array.from([0x30, 0x00]), // the reported case
       Uint8Array.from([0x30, 0x44, 0x02, 0x20]), // truncated
       new Uint8Array(72), // right length, all zeros
+      // Well-formed DER, mathematically impossible: r = 0, s = 0.
+      Uint8Array.from([0x30, 0x06, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00]),
+      // r valid, s = 0.
+      Uint8Array.from([0x30, 0x06, 0x02, 0x01, 0x07, 0x02, 0x01, 0x00]),
+      // Negative r (high bit set with no 0x00 pad).
+      Uint8Array.from([0x30, 0x06, 0x02, 0x01, 0x80, 0x02, 0x01, 0x07]),
+      // Non-minimal encoding: a 0x00 pad that clears nothing.
+      Uint8Array.from([0x30, 0x08, 0x02, 0x02, 0x00, 0x07, 0x02, 0x02, 0x00, 0x07]),
     ]) {
       expect(() =>
         buildPhase2Qr({ ...base, ...signed, certificateSignature: bad }),
@@ -432,6 +440,18 @@ describe('QR mandatory fields (tags 1-5)', () => {
     ]) {
       expect(() => buildPhase1Qr({ ...ok, vatNumber })).toThrow(/vatNumber/);
     }
+  });
+
+  it('rejects VAT larger than the VAT-INCLUSIVE total', () => {
+    // Tag 4 includes the VAT of tag 5, so this is arithmetically
+    // impossible — and it is the first thing an auditor recomputes.
+    expect(() =>
+      buildPhase1Qr({ ...ok, totalWithVatHalalas: 100, vatHalalas: 101 }),
+    ).toThrow(/cannot exceed/);
+    // Equal is legal: a 100%-VAT-on-zero-base edge, and zero VAT always.
+    expect(() =>
+      buildPhase1Qr({ ...ok, totalWithVatHalalas: 100, vatHalalas: 100 }),
+    ).not.toThrow();
   });
 
   it('rejects negative amounts — credit notes carry POSITIVE totals', () => {

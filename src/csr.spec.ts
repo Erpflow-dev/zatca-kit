@@ -163,6 +163,15 @@ describe('generateCsr', () => {
       'vatGroup with a 9-digit TIN',
       { vatGroup: true, organizationUnitName: '123456789' },
     ],
+    // DERIVED from the VAT number: 11th digit '1' = group registration,
+    // so the rule applies even when the caller never sets the flag.
+    [
+      'VAT-group VAT number (11th digit 1) with a branch-name OU',
+      {
+        organizationIdentifier: '300000000010003',
+        organizationUnitName: 'Riyadh Branch',
+      },
+    ],
     ['empty required field', { organizationName: '' }],
   ])('rejects %s', (_name, patch) => {
     expect(() => generateCsr({ ...config, ...patch })).toThrow(CsrConfigError);
@@ -174,6 +183,27 @@ describe('generateCsr', () => {
         ...config,
         vatGroup: true,
         organizationUnitName: '3001234567',
+      }),
+    ).not.toThrow();
+  });
+
+  it('accepts a derived VAT-group EGS when OU is the member TIN', () => {
+    expect(() =>
+      generateCsr({
+        ...config,
+        organizationIdentifier: '300000000010003',
+        organizationUnitName: '3001234567',
+      }),
+    ).not.toThrow();
+  });
+
+  it('leaves ordinary (non-group) VAT numbers free to use a branch name', () => {
+    // 11th digit '0' — a normal registration, OU is free text.
+    expect(() =>
+      generateCsr({
+        ...config,
+        organizationIdentifier: '300000000000003',
+        organizationUnitName: 'Riyadh Branch',
       }),
     ).not.toThrow();
   });
