@@ -217,6 +217,83 @@ CSIDs are environment-exclusive — one never works in another.
     this was proven 2026-08-19 with a clean live acceptance:
     `reportingStatus REPORTED`, zero warnings, zero errors.
 
+## What this kit refuses to do
+
+Every rule below exists because a real input got past an earlier version
+of this code during adversarial review. They are the difference between
+"the call returned 200" and "the invoice is actually filed", and each one
+is pinned by a test.
+
+**Success needs evidence, never a status code.**
+
+- Reporting is `ok` only on HTTP 200/202 **with** `reportingStatus:
+  REPORTED`, or a documented duplicate (208/409). A bare 2xx with an
+  empty body proves nothing and must never mark an invoice permanently
+  reported.
+- Clearance is `ok` only with `clearanceStatus: CLEARED` **and** a
+  stamped `clearedInvoice`. A duplicate reply carrying no payload is
+  flagged `duplicate` but not `ok` — your archived first response is the
+  legal copy.
+- If the same body carries a `validationResults` block, it must
+  **affirm** success (`PASS`/`WARNING`). `REPORTED` alongside
+  `status: ERROR`, an unknown status, or a populated error list is a
+  contradiction, and contradictions fail closed. Both spellings of the
+  error array (`errorMessages`, ZATCA's `erroMessages`) are merged, never
+  coalesced — an empty array in one must not hide a full one in the
+  other. Anything unreadable (a string where an object belongs, a
+  non-array error field) also fails closed instead of throwing.
+
+**Cryptographic material is verified, not inspected.**
+
+- QR tags 6/7/8 must be a *matched set*: the signature has to verify over
+  the invoice hash under the tag-8 key. Three individually valid blobs
+  from different invoices or terminals produce a QR that every offline
+  verifier rejects — and nothing downstream would catch it.
+- The XAdES envelope verifies the signature against the public key of the
+  certificate it embeds, before assembling anything.
+- Tag 8 must be the canonical 88-byte uncompressed SPKI on secp256k1. A
+  compressed point parses fine, names the same curve, and round-trips
+  unchanged — only an explicit shape check sees it.
+- Signatures (tags 7 and 9) must be DER `SEQUENCE { INTEGER r, INTEGER s }`
+  with `r`,`s` positive and minimally encoded.
+  `30 06 02 01 00 02 01 00` is well-formed DER and mathematically
+  impossible.
+- Base64 is decoded **strictly** everywhere it is evidence. Node's
+  decoder silently skips invalid characters, so `not-base64!!!` "decodes"
+  and would otherwise be signed.
+
+**The cleared invoice is parsed, not sniffed.**
+
+`clearedInvoice` becomes the legal document you archive and hand the
+buyer, so a leading `<` is not good enough. It must be canonical base64
+of a *well-formed* document — matched tags, one root, no character data
+outside it, no undefined entities — whose root is `Invoice` (or
+`CreditNote`/`DebitNote`) and is **in** the matching UBL 2.1 namespace,
+read from that element's own parsed declaration. Truncated XML,
+`…:xsd:Order-2`, a namespace declared only on a child, and one hidden
+inside another attribute's value all fail.
+
+**Fields must be what they claim.**
+
+Seller name non-empty; VAT number 15 digits starting and ending with `3`;
+amounts non-negative integer halalas; and VAT never exceeds the
+VAT-**inclusive** total (tag 4 contains tag 5 — an auditor's first
+recomputation). Timestamps are real instants, not merely well-shaped
+strings: `2026-99-99T99:99:99` and `2026-02-30` are rejected, and a
+`Date` is rendered as **Arabia Standard Time** wall clock, never as UTC
+digits with the `Z` deleted — that silently shifts every invoice three
+hours.
+
+**Onboarding data you cannot fix later.**
+
+The EGS serial is baked into the CSID, so it must be exactly three
+pipe-free components (`1-…|2-…|3-…`). `countryName` is checked against
+the real ISO 3166-1 alpha-2 list, not "any two capitals" — `ZZ` exists
+nowhere. And a VAT number whose **11th digit is `1`** is a VAT-group
+registration: its `organizationUnitName` must be the member's own
+10-digit TIN, detected from the number itself rather than left to a flag
+the caller has to remember.
+
 ## Design principles
 
 - **Money is integer halalas** (SAR minor units). Nothing here converts
@@ -242,6 +319,15 @@ CSIDs are environment-exclusive — one never works in another.
   > pick the world once (`'simulation'`) and the right template, URL,
   > and certificate follow automatically. There is no code path that
   > lets a test invoice reach the real tax authority.
+- **Fails closed, always** — an outcome is a success only on positive
+  evidence. Ambiguity, unreadable payloads and self-contradicting
+  responses all resolve to "not proven", never to "probably fine".
+  > In plain words: when ZATCA's answer is unclear, this library says
+  > "not filed" rather than "filed". Getting that backwards is the
+  > expensive direction: an invoice wrongly marked *reported* is
+  > forgotten forever and surfaces as a penalty at audit, while one
+  > wrongly marked *pending* just gets retried a minute later. Every
+  > check in the section above picks the recoverable failure.
 - **Tests lock bytes, not vibes** — DER output, digest vectors, and
   template bytes are pinned; a formatting "cleanup" fails the suite.
   > In plain words: the tests check the **exact bytes** the code
