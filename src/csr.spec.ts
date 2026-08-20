@@ -173,6 +173,13 @@ describe('generateCsr', () => {
       },
     ],
     ['empty required field', { organizationName: '' }],
+    // Whitespace is not content: a CSR of spaces is structurally perfect
+    // and identifies nobody, and the identity is baked into the CSID.
+    ['whitespace-only organizationName', { organizationName: '   ' }],
+    ['whitespace-only commonName', { commonName: '	' }],
+    ['whitespace-only locationAddress', { locationAddress: ' ' }],
+    ['whitespace-only industryBusinessCategory', { industryBusinessCategory: '  ' }],
+    ['serialNumber with blank components', { serialNumber: '1- |2- |3- ' }],
   ])('rejects %s', (_name, patch) => {
     expect(() => generateCsr({ ...config, ...patch })).toThrow(CsrConfigError);
   });

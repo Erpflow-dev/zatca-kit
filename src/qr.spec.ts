@@ -403,6 +403,10 @@ describe('buildPhase2Qr cryptographic linkage', () => {
       Uint8Array.from([0x30, 0x06, 0x02, 0x01, 0x80, 0x02, 0x01, 0x07]),
       // Non-minimal encoding: a 0x00 pad that clears nothing.
       Uint8Array.from([0x30, 0x08, 0x02, 0x02, 0x00, 0x07, 0x02, 0x02, 0x00, 0x07]),
+      // r == n (the curve order): well-formed DER, but r must be < n.
+      derSigWithR(SECP256K1_N),
+      // r > n.
+      derSigWithR(SECP256K1_N + 1n),
     ]) {
       expect(() =>
         buildPhase2Qr({ ...base, ...signed, certificateSignature: bad }),
@@ -465,6 +469,27 @@ describe('QR mandatory fields (tags 1-5)', () => {
     expect(() => buildPhase1Qr({ ...ok, vatHalalas: 0 })).not.toThrow();
   });
 });
+
+/** secp256k1 group order — r and s must both land in [1, n-1]. */
+const SECP256K1_N = BigInt(
+  '0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141',
+);
+
+/** DER `SEQUENCE { INTEGER r, INTEGER 7 }` for an arbitrary r. */
+function derSigWithR(r: bigint): Uint8Array {
+  let hex = r.toString(16);
+  if (hex.length % 2) hex = `0${hex}`;
+  let bytes = Buffer.from(hex, 'hex');
+  // DER: pad so the value stays positive.
+  if (bytes[0] & 0x80) bytes = Buffer.concat([Buffer.from([0x00]), bytes]);
+  const rPart = Buffer.concat([Buffer.from([0x02, bytes.length]), bytes]);
+  const sPart = Buffer.from([0x02, 0x01, 0x07]);
+  return Buffer.concat([
+    Buffer.from([0x30, rPart.length + sPart.length]),
+    rPart,
+    sPart,
+  ]);
+}
 
 /**
  * A MATCHED tags 6/7/8 triple: the signature really verifies over the

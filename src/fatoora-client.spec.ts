@@ -411,6 +411,26 @@ describe('FatooraClient onboarding endpoints', () => {
     expect(out.ok).toBe(false);
   });
 
+  it('complianceCheck: malformed error arrays fail closed instead of crashing', async () => {
+    // Reporting and clearance were guarded; this path still spread a
+    // non-iterable and threw TypeError out of the client.
+    for (const vr of [
+      { status: 'PASS', errorMessages: {} },
+      { status: 'PASS', erroMessages: 'oops' },
+    ]) {
+      stub(
+        200,
+        JSON.stringify({ reportingStatus: 'REPORTED', validationResults: vr }),
+      );
+      const out = await new FatooraClient().complianceCheck(creds, {
+        invoiceHash: invoice.invoiceHash,
+        uuid: invoice.uuid,
+        invoiceXmlBase64: invoice.invoiceXmlBase64,
+      });
+      expect(out.ok).toBe(false);
+    }
+  });
+
   it('complianceCheck: 200 with an EMPTY body fails closed', async () => {
     // No validationResults, no disposition — nothing proves ZATCA
     // validated anything. ok: true here would let onboarding claim a
@@ -496,6 +516,28 @@ describe('FatooraClient onboarding endpoints', () => {
     expect(out.ok).toBe(true);
     expect(out.duplicate).toBe(false);
     expect(out.clearedInvoiceBase64).toBe(XML_B64);
+  });
+
+  it('clearStandard: accepts a prefix declared on an ancestor element', async () => {
+    // Scoping must look UP the stack, not only at the element itself.
+    const xml =
+      '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"' +
+      ' xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">' +
+      '<cac:Party xmlns:cac="urn:x"><cbc:ID>INV-1</cbc:ID></cac:Party></Invoice>';
+    stub(
+      200,
+      JSON.stringify({
+        clearanceStatus: 'CLEARED',
+        clearedInvoice: Buffer.from(xml).toString('base64'),
+      }),
+    );
+    const out = await new FatooraClient().clearStandard({
+      creds,
+      invoiceHash: invoice.invoiceHash,
+      uuid: invoice.uuid,
+      invoiceXmlBase64: invoice.invoiceXmlBase64,
+    });
+    expect(out.ok).toBe(true);
   });
 
   it('clearStandard: CLEARED contradicted by validationResults fails closed', async () => {
@@ -653,6 +695,27 @@ describe('FatooraClient onboarding endpoints', () => {
       // attribute's value, so the root is in no namespace at all.
       Buffer.from(
         `<Invoice note=" xmlns='urn:oasis:names:specification:ubl:schema:xsd:Invoice-2'"/>`,
+      ).toString('base64'),
+      // Character reference to a codepoint XML forbids (NUL).
+      Buffer.from(
+        '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">' +
+          '<a>&#0;</a></Invoice>',
+      ).toString('base64'),
+      // Comment containing the forbidden '--'.
+      Buffer.from(
+        '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">' +
+          '<!-- a -- b --></Invoice>',
+      ).toString('base64'),
+      // XML declaration INSIDE the root: legal only at position 0.
+      Buffer.from(
+        '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">' +
+          '<?xml version="1.0"?></Invoice>',
+      ).toString('base64'),
+      // Prefix used with no xmlns:cbc in scope — not a namespaced
+      // document, a broken one.
+      Buffer.from(
+        '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">' +
+          '<cbc:ID>INV-1</cbc:ID></Invoice>',
       ).toString('base64'),
       // Mismatched closing tag.
       Buffer.from(

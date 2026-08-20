@@ -162,7 +162,11 @@ export function validateCsrConfig(config: CsrConfig): void {
     'industryBusinessCategory',
   ];
   for (const field of required) {
-    if (typeof config[field] !== 'string' || config[field].length === 0) {
+    const value = config[field];
+    // trim(), not length: a CSR of spaces is structurally perfect and
+    // completely unusable — and the identity it carries is baked into
+    // the CSID, so it cannot be corrected after onboarding.
+    if (typeof value !== 'string' || value.trim().length === 0) {
       throw new CsrConfigError(`${field} is required`);
     }
   }
@@ -170,7 +174,9 @@ export function validateCsrConfig(config: CsrConfig): void {
   // swallow '|4-anything', letting a malformed EGS serial through — and
   // the serial is baked into the CSID, so it is not fixable after
   // onboarding.
-  if (!/^1-[^|]+\|2-[^|]+\|3-[^|]+$/.test(config.serialNumber)) {
+  // Each component needs real content, not just "not a pipe": '1- |2- |3- '
+  // matched `[^|]+` and produced an EGS serial identifying nothing.
+  if (!/^1-\s*\S[^|]*\|2-\s*\S[^|]*\|3-\s*\S[^|]*$/.test(config.serialNumber)) {
     throw new CsrConfigError(
       "serialNumber must be '1-<solution>|2-<model>|3-<uuid>'",
     );

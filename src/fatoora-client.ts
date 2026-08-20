@@ -57,17 +57,26 @@ const UBL_NAMESPACES: Record<string, string> = {
 function scanXmlRoot(
   text: string,
 ): { name: string; attributes: Map<string, string> } | null {
-  const stack: string[] = [];
+  // Each frame carries the prefixes ITS element declared, so a prefix
+  // used by a child resolves only while that ancestor is open.
+  const stack: Array<{ name: string; declared: Set<string> }> = [];
   let root: { name: string; attributes: Map<string, string> } | null = null;
   let i = 0;
+
+  const inScope = (prefix: string, own: Set<string>): boolean => {
+    if (prefix === '' || prefix === 'xml' || prefix === 'xmlns') return true;
+    if (own.has(prefix)) return true;
+    return stack.some((frame) => frame.declared.has(prefix));
+  };
+
   while (i < text.length) {
     if (text[i] !== '<') {
       const next = text.indexOf('<', i);
       const chunk = text.slice(i, next === -1 ? text.length : next);
       // Character data outside the root element is not well-formed, and
-      // inside it every '&' must open a defined reference.
+      // inside it every '&' must open a legal reference.
       if (stack.length === 0 && chunk.trim() !== '') return null;
-      if (stack.length > 0 && !entitiesAreDefined(chunk)) return null;
+      if (stack.length > 0 && !referencesAreLegal(chunk)) return null;
       if (next === -1) break;
       i = next;
       continue;
@@ -75,6 +84,9 @@ function scanXmlRoot(
     if (text.startsWith('<!--', i)) {
       const end = text.indexOf('-->', i);
       if (end === -1) return null;
+      // XML forbids '--' inside a comment and a comment ending in '-'.
+      const body = text.slice(i + 4, end);
+      if (body.includes('--') || body.endsWith('-')) return null;
       i = end + 3;
       continue;
     }
@@ -91,6 +103,14 @@ function scanXmlRoot(
     if (text.startsWith('<?', i)) {
       const end = text.indexOf('?>', i);
       if (end === -1) return null;
+      const target = /^<\?([A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)/.exec(
+        text.slice(i, end),
+      );
+      if (target === null) return null;
+      // 'xml' is reserved: legal ONLY as the declaration, which must be
+      // the very first thing in the document. Anywhere else — including
+      // inside the root element — it is a fatal error.
+      if (target[1].toLowerCase() === 'xml' && i !== 0) return null;
       i = end + 2;
       continue;
     }
@@ -98,7 +118,7 @@ function scanXmlRoot(
     if (text.startsWith('</', i)) {
       const end = text.indexOf('>', i);
       if (end === -1) return null;
-      if (stack.pop() !== text.slice(i + 2, end).trim()) return null;
+      if (stack.pop()?.name !== text.slice(i + 2, end).trim()) return null;
       i = end + 1;
       continue;
     }
@@ -124,14 +144,32 @@ function scanXmlRoot(
     if (parsed === null) return null;
     const [, name, rawAttrs] = parsed;
     if (stack.length === 0 && root !== null) return null; // a second root
-    if (root === null) {
-      const attributes = parseAttributes(rawAttrs);
-      if (attributes === null) return null;
-      root = { name, attributes };
-    } else if (parseAttributes(rawAttrs) === null) {
-      return null;
+    const attributes = parseAttributes(rawAttrs);
+    if (attributes === null) return null;
+
+    // Namespace well-formedness: every prefix in use must be DECLARED —
+    // `<cbc:ID>` with no xmlns:cbc in scope is not a namespaced document,
+    // it is a broken one.
+    const declared = new Set<string>();
+    for (const [attrName, value] of attributes) {
+      if (attrName === 'xmlns') continue;
+      if (attrName.startsWith('xmlns:')) {
+        const prefix = attrName.slice(6);
+        // A prefix declaration must bind a non-empty URI (XML 1.0 rules).
+        if (prefix === '' || value === '') return null;
+        declared.add(prefix);
+      }
     }
-    if (!selfClosing) stack.push(name);
+    for (const attrName of attributes.keys()) {
+      const colon = attrName.indexOf(':');
+      if (colon === -1) continue;
+      if (!inScope(attrName.slice(0, colon), declared)) return null;
+    }
+    const colon = name.indexOf(':');
+    if (colon !== -1 && !inScope(name.slice(0, colon), declared)) return null;
+
+    if (root === null) root = { name, attributes };
+    if (!selfClosing) stack.push({ name, declared });
     i = j + 1;
   }
   return stack.length === 0 ? root : null;
@@ -139,13 +177,38 @@ function scanXmlRoot(
 
 /**
  * Without a DTD the only legal references are the five predefined
- * entities and numeric character references. `&foo;` is a fatal error to
- * a real parser, so a document carrying one is not the legal invoice.
+ * entities and numeric character references to characters XML actually
+ * permits. `&foo;` and `&#0;` are both fatal to a real parser, so a
+ * document carrying either is not the legal invoice.
  */
-function entitiesAreDefined(text: string): boolean {
-  return !text
-    .replace(/&(?:lt|gt|amp|apos|quot|#\d+|#x[0-9A-Fa-f]+);/g, '')
-    .includes('&');
+function referencesAreLegal(text: string): boolean {
+  let i = text.indexOf('&');
+  while (i !== -1) {
+    const end = text.indexOf(';', i);
+    if (end === -1) return false;
+    const body = text.slice(i + 1, end);
+    if (!['lt', 'gt', 'amp', 'apos', 'quot'].includes(body)) {
+      const numeric = /^#(x)?([0-9A-Fa-f]+)$/.exec(body);
+      if (numeric === null) return false;
+      if (!numeric[1] && /[^0-9]/.test(numeric[2])) return false;
+      const code = parseInt(numeric[2], numeric[1] ? 16 : 10);
+      if (!isLegalXmlChar(code)) return false;
+    }
+    i = text.indexOf('&', end);
+  }
+  return true;
+}
+
+/** XML 1.0 §2.2 Char production — NUL and most controls are excluded. */
+function isLegalXmlChar(code: number): boolean {
+  return (
+    code === 0x9 ||
+    code === 0xa ||
+    code === 0xd ||
+    (code >= 0x20 && code <= 0xd7ff) ||
+    (code >= 0xe000 && code <= 0xfffd) ||
+    (code >= 0x10000 && code <= 0x10ffff)
+  );
 }
 
 /**
@@ -173,7 +236,7 @@ function parseAttributes(raw: string): Map<string, string> | null {
     if (end === -1) return null;
     const value = raw.slice(i + 1, end);
     // '<' is never legal raw inside an attribute value.
-    if (value.includes('<') || !entitiesAreDefined(value)) return null;
+    if (value.includes('<') || !referencesAreLegal(value)) return null;
     if (attributes.has(name[1])) return null; // duplicate attribute
     attributes.set(name[1], value);
     i = end + 1;
@@ -546,7 +609,12 @@ export class FatooraClient {
     // MERGE both spellings, never coalesce: `errorMessages: []` beside a
     // populated `erroMessages` would otherwise short-circuit the check
     // and hide the real errors.
-    const errors = [...(vr?.errorMessages ?? []), ...(vr?.erroMessages ?? [])];
+    // Array-guarded like contradictsSuccess: `errorMessages: {}` would
+    // otherwise spread a non-iterable and throw out of the client. A
+    // malformed field counts AS an error — it is not proof of a pass.
+    const errors = [vr?.errorMessages, vr?.erroMessages].flatMap((field) =>
+      field == null ? [] : Array.isArray(field) ? field : ['<malformed>'],
+    );
     const vrStatus = String(vr?.status ?? '').toUpperCase();
     const disposition = parsed?.reportingStatus ?? parsed?.clearanceStatus ?? '';
     return {

@@ -249,6 +249,11 @@ function parseTag8Key(bytes: Uint8Array): KeyObject {
   return key;
 }
 
+/** Order of the secp256k1 group: r and s must both be in [1, n-1]. */
+const SECP256K1_ORDER = BigInt(
+  '0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141',
+);
+
 /**
  * DER ECDSA signature: `SEQUENCE { INTEGER r, INTEGER s }`. Tag 7 carries
  * the base64 of exactly these bytes; anything else is a signature ZATCA
@@ -276,6 +281,10 @@ function isDerEcdsaSignature(sig: Buffer): boolean {
     if (value.length > 1 && value[0] === 0x00 && !(value[1] & 0x80)) {
       return false;
     }
+    // r and s live in [1, n-1]. A value at or above the curve order is
+    // arithmetically impossible for a real signature, however well-formed
+    // its DER encoding is.
+    if (BigInt(`0x${value.toString('hex')}`) >= SECP256K1_ORDER) return false;
     off += 2 + len;
     if (off > sig.length) return false;
   }
