@@ -255,9 +255,9 @@ is pinned by a test.
   compressed point parses fine, names the same curve, and round-trips
   unchanged — only an explicit shape check sees it.
 - Signatures (tags 7 and 9) must be DER `SEQUENCE { INTEGER r, INTEGER s }`
-  with `r`,`s` positive and minimally encoded.
-  `30 06 02 01 00 02 01 00` is well-formed DER and mathematically
-  impossible.
+  with `r`,`s` minimally encoded and inside `[1, n-1]` for the secp256k1
+  group order. `30 06 02 01 00 02 01 00` (r=0, s=0) and any value at or
+  above `n` are well-formed DER and mathematically impossible.
 - Base64 is decoded **strictly** everywhere it is evidence. Node's
   decoder silently skips invalid characters, so `not-base64!!!` "decodes"
   and would otherwise be signed.
@@ -266,12 +266,26 @@ is pinned by a test.
 
 `clearedInvoice` becomes the legal document you archive and hand the
 buyer, so a leading `<` is not good enough. It must be canonical base64
-of a *well-formed* document — matched tags, one root, no character data
-outside it, no undefined entities — whose root is `Invoice` (or
-`CreditNote`/`DebitNote`) and is **in** the matching UBL 2.1 namespace,
-read from that element's own parsed declaration. Truncated XML,
-`…:xsd:Order-2`, a namespace declared only on a child, and one hidden
-inside another attribute's value all fail.
+of a document that is well-formed by XML's *actual* rules, whose root is
+`Invoice` (or `CreditNote`/`DebitNote`) and is **in** the matching UBL
+2.1 namespace, read from that element's own parsed declaration. All of
+these are rejected:
+
+| Input | Why |
+| --- | --- |
+| `<Invoice…><cbc:ID>1` | truncated — tags left open |
+| `…:xsd:Order-2` | wrong UBL namespace |
+| `<Invoice><x xmlns="…Invoice-2"/>` | namespace declared only on a child |
+| `<Invoice note=" xmlns='…'"/>` | namespace hidden in another attribute's value |
+| `&nbsp;` | undefined entity (there is no DTD) |
+| `&#0;` | character reference outside XML 1.0's Char production |
+| `<!-- a -- b -->` | `--` is forbidden inside comments |
+| `<Invoice…><?xml version="1.0"?>` | the declaration is legal only at byte 0 |
+| `<cbc:ID>` with no `xmlns:cbc` | prefix used but never declared |
+| `<![CDATA[…]]>` before the root | character data outside the document element |
+
+Namespace prefixes resolve against a scope stack, so a prefix declared on
+an **ancestor** works exactly as a real parser would treat it.
 
 **Fields must be what they claim.**
 
@@ -287,7 +301,9 @@ hours.
 **Onboarding data you cannot fix later.**
 
 The EGS serial is baked into the CSID, so it must be exactly three
-pipe-free components (`1-…|2-…|3-…`). `countryName` is checked against
+pipe-free components (`1-…|2-…|3-…`), each with real content — a CSR of
+spaces is structurally perfect and identifies nobody, so every required
+field is checked after trimming. `countryName` is checked against
 the real ISO 3166-1 alpha-2 list, not "any two capitals" — `ZZ` exists
 nowhere. And a VAT number whose **11th digit is `1`** is a VAT-group
 registration: its `organizationUnitName` must be the member's own
