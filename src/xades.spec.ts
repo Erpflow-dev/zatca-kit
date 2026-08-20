@@ -1,4 +1,9 @@
-import { createVerify, generateKeyPairSync } from 'node:crypto';
+import {
+  createHash,
+  createSign,
+  createVerify,
+  generateKeyPairSync,
+} from 'node:crypto';
 import {
   buildXadesExtension,
   formatSigningTime,
@@ -127,18 +132,167 @@ describe('signInvoiceHash', () => {
 });
 
 describe('buildXadesExtension', () => {
+  // The envelope now VERIFIES its inputs, so the fixture must be a real
+  // certificate whose private key we hold — an unrelated signature is
+  // precisely what must fail. (The live-proven SignedProperties vector
+  // stays pinned to CERT_B64 in the describe above, which calls
+  // signedPropertiesHash directly.)
+  const { cert, sign } = selfSignedFixture();
+
   it('assembles a complete envelope with the for-signing digest embedded', () => {
-    const cert = parseCertificate(CERT_B64);
+    const invoiceHashBase64 = createHash('sha256')
+      .update('<Invoice/>')
+      .digest('base64');
+    const signatureBase64 = sign(invoiceHashBase64);
     const xml = buildXadesExtension({
-      invoiceHashBase64: 'SGFzaA==',
-      signatureBase64: 'U2ln',
+      invoiceHashBase64,
+      signatureBase64,
       certificate: cert,
       signingTime: new Date(Date.UTC(2026, 0, 1)),
     });
-    expect(xml).toContain('<ds:DigestValue>SGFzaA==</ds:DigestValue>');
-    expect(xml).toContain(`<ds:DigestValue>${SIGNED_PROPS_HASH}</ds:DigestValue>`);
-    expect(xml).toContain('<ds:SignatureValue>U2ln</ds:SignatureValue>');
-    expect(xml).toContain(`<ds:X509Certificate>${CERT_B64}</ds:X509Certificate>`);
+    expect(xml).toContain(
+      `<ds:DigestValue>${invoiceHashBase64}</ds:DigestValue>`,
+    );
+    expect(xml).toContain(
+      `<ds:DigestValue>${signedPropertiesHash(SIGNING_TIME, cert)}</ds:DigestValue>`,
+    );
+    expect(xml).toContain(
+      `<ds:SignatureValue>${signatureBase64}</ds:SignatureValue>`,
+    );
+    expect(xml).toContain(
+      `<ds:X509Certificate>${cert.base64Der}</ds:X509Certificate>`,
+    );
     expect(xml).not.toContain('SET_');
   });
+
+  it('refuses a signature made by a key unrelated to the embedded certificate', () => {
+    const other = selfSignedFixture();
+    const invoiceHashBase64 = createHash('sha256')
+      .update('<Invoice/>')
+      .digest('base64');
+    expect(() =>
+      buildXadesExtension({
+        invoiceHashBase64,
+        // Correct hash, valid DER ECDSA — but the WRONG key. ZATCA would
+        // reject every invoice this terminal ever files.
+        signatureBase64: other.sign(invoiceHashBase64),
+        certificate: cert,
+        signingTime: new Date(Date.UTC(2026, 0, 1)),
+      }),
+    ).toThrow(/does not verify/);
+  });
+
+  it('refuses a signature over a DIFFERENT invoice hash', () => {
+    const mine = createHash('sha256').update('<Invoice/>').digest('base64');
+    const theirs = createHash('sha256').update('<Other/>').digest('base64');
+    expect(() =>
+      buildXadesExtension({
+        invoiceHashBase64: mine,
+        signatureBase64: sign(theirs),
+        certificate: cert,
+        signingTime: new Date(Date.UTC(2026, 0, 1)),
+      }),
+    ).toThrow(/does not verify/);
+  });
+
+  it('refuses non-32-byte digests and non-DER signatures', () => {
+    const good = createHash('sha256').update('<Invoice/>').digest('base64');
+    expect(() =>
+      buildXadesExtension({
+        invoiceHashBase64: 'QUJD', // 3 bytes
+        signatureBase64: sign(good),
+        certificate: cert,
+        signingTime: new Date(Date.UTC(2026, 0, 1)),
+      }),
+    ).toThrow(/32 SHA-256 bytes/);
+    expect(() =>
+      buildXadesExtension({
+        invoiceHashBase64: good,
+        signatureBase64: 'not-base64!!!',
+        certificate: cert,
+        signingTime: new Date(Date.UTC(2026, 0, 1)),
+      }),
+    ).toThrow(TypeError);
+  });
 });
+
+// ---- minimal self-signed certificate builder (test-only) ------------------
+// Node generates keys but not certificates, and the kit ships no deps.
+// This emits just enough X.509 v3 DER for parseCertificate + verification.
+
+// Function declarations, not consts: the fixture is built while the
+// describe bodies run, which is before later const initializers exist.
+function derLen(n: number): Buffer {
+  if (n < 0x80) return Buffer.from([n]);
+  const b: number[] = [];
+  for (let v = n; v > 0; v >>= 8) b.unshift(v & 0xff);
+  return Buffer.from([0x80 | b.length, ...b]);
+}
+function der(tag: number, ...parts: Buffer[]): Buffer {
+  const body = Buffer.concat(parts);
+  return Buffer.concat([Buffer.from([tag]), derLen(body.length), body]);
+}
+function derOid(dotted: string): Buffer {
+  const p = dotted.split('.').map(Number);
+  const out = [p[0] * 40 + p[1]];
+  for (const n of p.slice(2)) {
+    const chunk: number[] = [n & 0x7f];
+    for (let v = n >> 7; v > 0; v >>= 7) chunk.unshift((v & 0x7f) | 0x80);
+    out.push(...chunk);
+  }
+  return der(0x06, Buffer.from(out));
+}
+function utcTime(d: Date): Buffer {
+  return der(
+    0x17,
+    Buffer.from(`${d.toISOString().slice(2, 19).replace(/[-:T]/g, '')}Z`),
+  );
+}
+
+function selfSignedFixture(): {
+  cert: ReturnType<typeof parseCertificate>;
+  sign: (hashBase64: string) => string;
+} {
+  const { privateKey, publicKey } = generateKeyPairSync('ec', {
+    namedCurve: 'secp256k1',
+  });
+  const spki = publicKey.export({ type: 'spki', format: 'der' });
+  const ecdsaSha256 = der(0x30, derOid('1.2.840.10045.4.3.2'));
+  const name = der(
+    0x30,
+    der(
+      0x31,
+      der(0x30, derOid('2.5.4.3'), der(0x0c, Buffer.from('eInvoicing'))),
+    ),
+  );
+  const tbs = der(
+    0x30,
+    der(0xa0, der(0x02, Buffer.from([0x02]))), // v3
+    der(0x02, Buffer.from([0x01, 0x2c])), // serialNumber
+    ecdsaSha256,
+    name,
+    der(
+      0x30,
+      utcTime(new Date('2026-01-01T00:00:00Z')),
+      utcTime(new Date('2036-01-01T00:00:00Z')),
+    ),
+    name,
+    spki,
+  );
+  const signer = createSign('sha256');
+  signer.update(tbs);
+  const certDer = der(
+    0x30,
+    tbs,
+    ecdsaSha256,
+    der(0x03, Buffer.from([0x00]), signer.sign(privateKey)),
+  );
+  return {
+    cert: parseCertificate(certDer.toString('base64')),
+    sign: (hashBase64: string) =>
+      signInvoiceHash(
+        hashBase64,
+        privateKey.export({ type: 'sec1', format: 'pem' }).toString(),
+      ),
+  };
+}

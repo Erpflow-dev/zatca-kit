@@ -541,6 +541,41 @@ describe('FatooraClient onboarding endpoints', () => {
     expect(good.ok).toBe(true);
   });
 
+  it('malformed validationResults arrays fail closed instead of crashing', async () => {
+    // `errorMessages: {}` used to hit a spread of a non-iterable and
+    // throw TypeError out of the client, taking the caller down with it.
+    for (const vr of [
+      { status: 'PASS', errorMessages: {} },
+      { status: 'PASS', erroMessages: 'oops' },
+      { status: 'PASS', errorMessages: 42 },
+    ]) {
+      stub(
+        200,
+        JSON.stringify({
+          clearanceStatus: 'CLEARED',
+          clearedInvoice: XML_B64,
+          validationResults: vr,
+        }),
+      );
+      const out = await new FatooraClient().clearStandard({
+        creds,
+        invoiceHash: invoice.invoiceHash,
+        uuid: invoice.uuid,
+        invoiceXmlBase64: invoice.invoiceXmlBase64,
+      });
+      expect(out.ok).toBe(false);
+
+      stub(200, JSON.stringify({ reportingStatus: 'REPORTED', validationResults: vr }));
+      const rep = await new FatooraClient().reportSimplified({
+        creds,
+        invoiceHash: invoice.invoiceHash,
+        uuid: invoice.uuid,
+        invoiceXmlBase64: invoice.invoiceXmlBase64,
+      });
+      expect(rep.ok).toBe(false);
+    }
+  });
+
   it('clearStandard: CLEARED with a clearedInvoice that is not base64 XML fails closed', async () => {
     // The stamped copy becomes the LEGAL invoice we archive and hand to
     // the buyer — garbage must never be filed as a legal document.
@@ -552,6 +587,24 @@ describe('FatooraClient onboarding endpoints', () => {
       Buffer.from('<?xml version="1.0"?>').toString('base64'), // declaration only
       Buffer.from('<Invoice/>').toString('base64'), // well-formed, but no UBL
       Buffer.from('<html><body>oops</body></html>').toString('base64'), // wrong root
+      // TRUNCATED: the common corruption. Root opens, never closes.
+      Buffer.from(
+        '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">' +
+          '<cbc:ID>INV-1',
+      ).toString('base64'),
+      // WRONG UBL namespace — a substring check accepts this.
+      Buffer.from(
+        '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Order-2"/>',
+      ).toString('base64'),
+      // Namespace present, but only on a CHILD; the root is in none.
+      Buffer.from(
+        '<Invoice><x xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"/></Invoice>',
+      ).toString('base64'),
+      // Mismatched closing tag.
+      Buffer.from(
+        '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">' +
+          '<a></b></Invoice>',
+      ).toString('base64'),
     ]) {
       stub(
         200,

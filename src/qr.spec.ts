@@ -1,4 +1,9 @@
-import { createHash, createSign, generateKeyPairSync } from 'node:crypto';
+import {
+  createHash,
+  createPublicKey,
+  createSign,
+  generateKeyPairSync,
+} from 'node:crypto';
 import {
   buildPhase1Qr,
   buildPhase2Qr,
@@ -139,10 +144,8 @@ describe('buildPhase1Qr', () => {
         timestamp: '2022-04-25T15:30:00',
         totalWithVatHalalas: 100000,
         vatHalalas: 15000,
-        invoiceHashBase64: realHashB64(),
-        signatureBase64: realSignatureB64(),
-        publicKeyBytes: realSpki(),
-        certificateSignature: new Uint8Array(72),
+        ...signedTriple(),
+        certificateSignature: derSig(),
       }),
     ).toThrow(RangeError);
   });
@@ -151,7 +154,7 @@ describe('buildPhase1Qr', () => {
     expect(() =>
       buildPhase1Qr({
         sellerName: 'م'.repeat(200), // 400 UTF-8 bytes
-        vatNumber: '3',
+        vatNumber: '310122393500003',
         timestamp: new Date(),
         totalWithVatHalalas: 0,
         vatHalalas: 0,
@@ -183,10 +186,9 @@ describe('halalasToSar', () => {
 
 describe('buildPhase2Qr', () => {
   it('adds tags 6-7 as base64 STRINGS and 8-9 as RAW bytes', () => {
-    const publicKeyBytes = realSpki();
-    const certificateSignature = Uint8Array.from([48, 68, 2, 32]);
-    const invoiceHashBase64 = realHashB64();
-    const signatureBase64 = realSignatureB64();
+    const { publicKeyBytes, invoiceHashBase64, signatureBase64 } =
+      signedTriple();
+    const certificateSignature = derSig();
     const b64 = buildPhase2Qr({
       sellerName: 'Bobs Records',
       vatNumber: '310122393500003',
@@ -215,9 +217,7 @@ describe('buildPhase2Qr', () => {
       timestamp: '2022-04-25T15:30:00',
       totalWithVatHalalas: 100000,
       vatHalalas: 15000,
-      invoiceHashBase64: realHashB64(),
-      signatureBase64: realSignatureB64(),
-      publicKeyBytes: realSpki(),
+      ...signedTriple(),
     });
     const tags = decodeTlv(b64);
     expect(tags.size).toBe(8);
@@ -225,14 +225,15 @@ describe('buildPhase2Qr', () => {
   });
 
   it('rejects tag-8 input that is not a full 88-byte DER SPKI', () => {
+    const signed = signedTriple();
     const base = {
       sellerName: 'Bobs Records',
       vatNumber: '310122393500003',
       timestamp: '2022-04-25T15:30:00',
       totalWithVatHalalas: 100000,
       vatHalalas: 15000,
-      invoiceHashBase64: realHashB64(),
-      signatureBase64: realSignatureB64(),
+      invoiceHashBase64: signed.invoiceHashBase64,
+      signatureBase64: signed.signatureBase64,
     };
     // Four arbitrary bytes — the case that recreated the tag-8 failure.
     expect(() =>
@@ -258,28 +259,31 @@ describe('buildPhase2Qr', () => {
       buildPhase2Qr({ ...base, publicKeyBytes: fakeSpki }),
     ).toThrow(TypeError);
     // A real key on the WRONG curve is still wrong (P-256 ≠ secp256k1).
+    // Its SPKI is 91 bytes, so the canonical-form check fires first —
+    // either way the key never reaches a receipt.
     const p256 = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
       .publicKey.export({ type: 'spki', format: 'der' });
     expect(() => buildPhase2Qr({ ...base, publicKeyBytes: p256 })).toThrow(
-      /secp256k1/,
+      /secp256k1|canonical 88-byte/,
     );
-    // The genuine article passes.
+    // The genuine article — the key that actually made the signature.
     expect(() =>
-      buildPhase2Qr({ ...base, publicKeyBytes: realSpki() }),
+      buildPhase2Qr({ ...base, publicKeyBytes: signed.publicKeyBytes }),
     ).not.toThrow();
   });
 
   it('rejects tag-6/7 payloads that are not a real hash and DER signature', () => {
+    const signed = signedTriple();
     const base = {
       sellerName: 'Bobs Records',
       vatNumber: '310122393500003',
       timestamp: '2022-04-25T15:30:00',
       totalWithVatHalalas: 100000,
       vatHalalas: 15000,
-      publicKeyBytes: realSpki(),
+      publicKeyBytes: signed.publicKeyBytes,
     };
-    const goodHash = realHashB64();
-    const goodSig = realSignatureB64();
+    const goodHash = signed.invoiceHashBase64;
+    const goodSig = signed.signatureBase64;
 
     // Tag 6 must decode canonically to 32 SHA-256 bytes.
     for (const badHash of [
@@ -311,25 +315,174 @@ describe('buildPhase2Qr', () => {
   });
 });
 
+describe('buildPhase2Qr cryptographic linkage', () => {
+  const base = {
+    sellerName: 'Bobs Records',
+    vatNumber: '310122393500003',
+    timestamp: '2022-04-25T15:30:00',
+    totalWithVatHalalas: 100000,
+    vatHalalas: 15000,
+  };
+
+  it('refuses a signature from a DIFFERENT key than tag 8', () => {
+    const mine = signedTriple();
+    const other = signedTriple();
+    // Every field individually valid; the QR still cannot be verified
+    // by anyone, because tag 7 was not made by tag 8's key.
+    expect(() =>
+      buildPhase2Qr({
+        ...base,
+        invoiceHashBase64: mine.invoiceHashBase64,
+        signatureBase64: other.signatureBase64,
+        publicKeyBytes: mine.publicKeyBytes,
+      }),
+    ).toThrow(/does not verify/);
+  });
+
+  it('refuses a signature over a DIFFERENT invoice hash', () => {
+    const a = signedTriple('invoice-A');
+    const b = signedTriple('invoice-B');
+    expect(() =>
+      buildPhase2Qr({
+        ...base,
+        invoiceHashBase64: b.invoiceHashBase64,
+        signatureBase64: a.signatureBase64,
+        publicKeyBytes: a.publicKeyBytes,
+      }),
+    ).toThrow(/does not verify/);
+  });
+
+  it('refuses a COMPRESSED SPKI — tag 8 is the canonical 88-byte form', () => {
+    const { privateKey, publicKey } = generateKeyPairSync('ec', {
+      namedCurve: 'secp256k1',
+    });
+    const hash = createHash('sha256').update('invoice').digest();
+    const signer = createSign('sha256');
+    signer.update(hash);
+    // Node cannot EXPORT a compressed SPKI, so build one: same key, same
+    // curve, valid DER — but the 56-byte compressed-point encoding
+    // instead of the 88-byte uncompressed form the field documents.
+    const spki = publicKey.export({ type: 'spki', format: 'der' });
+    const algorithm = spki.subarray(2, 20); // AlgorithmIdentifier
+    const x = spki.subarray(24, 56);
+    const y = spki.subarray(56, 88);
+    const point = Buffer.concat([
+      Buffer.from([(y[31] & 1) === 1 ? 0x03 : 0x02]),
+      x,
+    ]);
+    const compressed = Buffer.concat([
+      Buffer.from([0x30, 0x36]),
+      algorithm,
+      Buffer.from([0x03, 0x22, 0x00]),
+      point,
+    ]);
+    expect(compressed.length).toBe(56);
+    expect(() =>
+      buildPhase2Qr({
+        ...base,
+        invoiceHashBase64: hash.toString('base64'),
+        signatureBase64: signer.sign(privateKey).toString('base64'),
+        publicKeyBytes: compressed,
+      }),
+      // Rejected either way: Node may refuse to parse it, or our
+      // canonical re-export comparison catches it.
+    ).toThrow(/canonical 88-byte uncompressed|not a parseable DER/);
+  });
+
+  it('refuses a malformed tag-9 certificate signature', () => {
+    const signed = signedTriple();
+    for (const bad of [
+      Uint8Array.from([0x30, 0x00]), // the reported case
+      Uint8Array.from([0x30, 0x44, 0x02, 0x20]), // truncated
+      new Uint8Array(72), // right length, all zeros
+    ]) {
+      expect(() =>
+        buildPhase2Qr({ ...base, ...signed, certificateSignature: bad }),
+      ).toThrow(/certificateSignature/);
+    }
+    expect(() =>
+      buildPhase2Qr({ ...base, ...signed, certificateSignature: derSig() }),
+    ).not.toThrow();
+  });
+});
+
+describe('QR mandatory fields (tags 1-5)', () => {
+  const ok = {
+    sellerName: 'Bobs Records',
+    vatNumber: '310122393500003',
+    timestamp: '2022-04-25T15:30:00',
+    totalWithVatHalalas: 100000,
+    vatHalalas: 15000,
+  };
+
+  it('rejects an empty or blank seller name', () => {
+    for (const sellerName of ['', '   ']) {
+      expect(() => buildPhase1Qr({ ...ok, sellerName })).toThrow(/sellerName/);
+    }
+  });
+
+  it('rejects VAT numbers that are not 15 digits starting and ending with 3', () => {
+    for (const vatNumber of [
+      '',
+      '31012239350000', // 14 digits
+      '3101223935000031', // 16 digits
+      '410122393500003', // wrong leading digit
+      '310122393500004', // wrong trailing digit
+      '31012239350000A',
+    ]) {
+      expect(() => buildPhase1Qr({ ...ok, vatNumber })).toThrow(/vatNumber/);
+    }
+  });
+
+  it('rejects negative amounts — credit notes carry POSITIVE totals', () => {
+    expect(() =>
+      buildPhase1Qr({ ...ok, totalWithVatHalalas: -100 }),
+    ).toThrow(/totalWithVatHalalas/);
+    expect(() => buildPhase1Qr({ ...ok, vatHalalas: -1 })).toThrow(
+      /vatHalalas/,
+    );
+    // Zero is legitimate (a fully exempt line).
+    expect(() => buildPhase1Qr({ ...ok, vatHalalas: 0 })).not.toThrow();
+  });
+});
+
 /**
- * A REAL secp256k1 SPKI — the old fixture was 88 bytes of zeros behind a
- * DER header, which is exactly the "fake key passes" hole this suite now
- * guards.
+ * A MATCHED tags 6/7/8 triple: the signature really verifies over the
+ * hash under that key. Independently-valid-but-unrelated fixtures are
+ * exactly what buildPhase2Qr must now reject, so the happy path needs
+ * genuine crypto rather than three plausible blobs.
  */
+function signedTriple(payload = 'invoice'): {
+  invoiceHashBase64: string;
+  signatureBase64: string;
+  publicKeyBytes: Uint8Array;
+} {
+  const { privateKey, publicKey } = generateKeyPairSync('ec', {
+    namedCurve: 'secp256k1',
+  });
+  const hash = createHash('sha256').update(payload).digest();
+  const signer = createSign('sha256');
+  signer.update(hash);
+  return {
+    invoiceHashBase64: hash.toString('base64'),
+    signatureBase64: signer.sign(privateKey).toString('base64'),
+    publicKeyBytes: publicKey.export({ type: 'spki', format: 'der' }),
+  };
+}
+
+/** Just the canonical SPKI, for tag-8 shape tests. */
 function realSpki(): Uint8Array {
-  const { publicKey } = generateKeyPairSync('ec', { namedCurve: 'secp256k1' });
-  return publicKey.export({ type: 'spki', format: 'der' });
+  return signedTriple().publicKeyBytes;
 }
 
-/** base64 of a genuine 32-byte SHA-256 digest (tag 6). */
-function realHashB64(): string {
-  return createHash('sha256').update('invoice').digest('base64');
-}
-
-/** base64 of a genuine DER ECDSA signature (tag 7). */
-function realSignatureB64(): string {
+/**
+ * A structurally valid DER ECDSA signature for tag 9 (the CA's signature
+ * over the CSID cert). Its issuer key is not available to a verifier, so
+ * only the DER structure is checkable — `30 00` must not pass.
+ */
+function derSig(): Uint8Array {
   const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'secp256k1' });
   const signer = createSign('sha256');
-  signer.update('invoice');
-  return signer.sign(privateKey).toString('base64');
+  signer.update('cert');
+  return signer.sign(privateKey);
 }

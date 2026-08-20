@@ -149,9 +149,39 @@ describe('generateCsr', () => {
       { serialNumber: '1-POS|2-|3-unit-id' },
     ],
     ['countryName not ISO2', { countryName: 'KSA' }],
+    // Shape-only validation accepted any two capitals, including codes
+    // that exist nowhere — baked into a certificate that cannot be fixed.
+    ['countryName ZZ (not a real country)', { countryName: 'ZZ' }],
+    ['countryName XX (user-assigned, not ISO)', { countryName: 'XX' }],
+    ['countryName lowercase', { countryName: 'sa' }],
+    // VAT-GROUP members must carry the member's own 10-digit TIN in OU.
+    [
+      'vatGroup with a free-text organizational unit',
+      { vatGroup: true, organizationUnitName: 'Main Branch' },
+    ],
+    [
+      'vatGroup with a 9-digit TIN',
+      { vatGroup: true, organizationUnitName: '123456789' },
+    ],
     ['empty required field', { organizationName: '' }],
   ])('rejects %s', (_name, patch) => {
     expect(() => generateCsr({ ...config, ...patch })).toThrow(CsrConfigError);
+  });
+
+  it('accepts a VAT-group EGS whose OU is the member 10-digit TIN', () => {
+    expect(() =>
+      generateCsr({
+        ...config,
+        vatGroup: true,
+        organizationUnitName: '3001234567',
+      }),
+    ).not.toThrow();
+  });
+
+  it('accepts real ISO country codes other than SA', () => {
+    for (const countryName of ['AE', 'EG', 'GB', 'JO']) {
+      expect(() => generateCsr({ ...config, countryName })).not.toThrow();
+    }
   });
 
   // openssl parse+verify — definitive but host-dependent: always present on

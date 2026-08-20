@@ -14,7 +14,13 @@
  *   encoding, same as the certificate hash).
  * Do not reformat either template.
  */
-import { X509Certificate, createHash, createSign } from 'node:crypto';
+import {
+  X509Certificate,
+  createHash,
+  createSign,
+  createVerify,
+  type KeyObject,
+} from 'node:crypto';
 import { decodeBase64Strict } from './base64';
 
 export interface CertificateInfo {
@@ -243,8 +249,48 @@ export interface XadesInput {
   signingTime: Date;
 }
 
-/** The complete `ext:UBLExtension` block (goes inside ext:UBLExtensions). */
+/**
+ * The complete `ext:UBLExtension` block (goes inside ext:UBLExtensions).
+ *
+ * Assembling is the LAST gate before an invoice leaves the terminal, so
+ * the three cryptographic inputs are checked against each other here:
+ * the digest must be a real SHA-256, the signature a real DER ECDSA
+ * value, and — the invariant a verifier re-runs — the signature must
+ * verify over that digest under the public key of the very certificate
+ * this envelope embeds. A signature from an unrelated key produces a
+ * structurally perfect XML that ZATCA rejects for every invoice the
+ * terminal ever files.
+ */
 export function buildXadesExtension(input: XadesInput): string {
+  const hash = decodeBase64Strict(input.invoiceHashBase64, 'invoiceHashBase64');
+  if (hash.length !== 32) {
+    throw new TypeError(
+      `invoiceHashBase64 must decode to 32 SHA-256 bytes, got ${hash.length}`,
+    );
+  }
+  const signature = decodeBase64Strict(
+    input.signatureBase64,
+    'signatureBase64',
+  );
+  let certKey: KeyObject;
+  try {
+    certKey = new X509Certificate(
+      `-----BEGIN CERTIFICATE-----\n${input.certificate.base64Der}\n` +
+        `-----END CERTIFICATE-----`,
+    ).publicKey;
+  } catch (err) {
+    throw new TypeError(
+      `certificate.base64Der is not a parseable X.509 certificate: ` +
+        `${(err as Error).message}`,
+    );
+  }
+  if (!createVerify('sha256').update(hash).verify(certKey, signature)) {
+    throw new TypeError(
+      'signatureBase64 does not verify over invoiceHashBase64 with the ' +
+        "embedded certificate's public key — the signature was made by a " +
+        'different key or over a different invoice',
+    );
+  }
   const signingTime = formatSigningTime(input.signingTime);
   const propsHash = signedPropertiesHash(signingTime, input.certificate);
   const rendered = signedPropertiesRendered(signingTime, input.certificate);

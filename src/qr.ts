@@ -22,7 +22,7 @@
  * touches floating point.
  */
 
-import { createPublicKey } from 'node:crypto';
+import { createPublicKey, createVerify, type KeyObject } from 'node:crypto';
 import { decodeBase64Strict } from './base64';
 
 export interface Phase1Fields {
@@ -132,6 +132,30 @@ function tlv(tag: number, value: Uint8Array): Buffer {
 const utf8 = (s: string): Uint8Array => Buffer.from(s, 'utf8');
 
 function phase1Tlvs(f: Phase1Fields): Buffer[] {
+  // Tags 1-5 are MANDATORY content, not just mandatory slots: a QR with
+  // an empty seller name or a malformed VAT number is a non-compliant
+  // receipt, and nothing catches it until an inspection months later.
+  if (f.sellerName.trim().length === 0) {
+    throw new TypeError('sellerName is required (tag 1)');
+  }
+  if (!/^3\d{13}3$/.test(f.vatNumber)) {
+    throw new TypeError(
+      `vatNumber must be 15 digits starting and ending with 3 (tag 2), ` +
+        `got '${f.vatNumber}'`,
+    );
+  }
+  // Credit notes carry POSITIVE amounts and reference the original
+  // invoice, so a negative total on a QR is always a caller bug.
+  for (const [label, amount] of [
+    ['totalWithVatHalalas', f.totalWithVatHalalas],
+    ['vatHalalas', f.vatHalalas],
+  ] as const) {
+    if (!Number.isSafeInteger(amount) || amount < 0) {
+      throw new TypeError(
+        `${label} must be a non-negative integer of halalas, got ${amount}`,
+      );
+    }
+  }
   return [
     tlv(1, utf8(f.sellerName)),
     tlv(2, utf8(f.vatNumber)),
@@ -171,26 +195,49 @@ export function buildPhase1Qr(fields: Phase1Fields): string {
  * guards against is a WRONG KEY, so the bytes are actually parsed and
  * the curve checked. (The bare 65-byte point is the classic mistake.)
  */
-function assertSecp256k1Spki(bytes: Uint8Array): void {
-  let namedCurve: string | undefined;
+function parseTag8Key(bytes: Uint8Array): KeyObject {
+  const input = Buffer.from(bytes);
+  // The CONTRACT is the canonical 88-byte UNCOMPRESSED SPKI:
+  //   30 56 | AlgorithmIdentifier(18) | 03 42 00 | 04 ‖ X(32) ‖ Y(32)
+  // A compressed point (56 bytes, 02/03 marker) is a valid secp256k1 key
+  // that Node parses AND round-trips unchanged, so neither parsing nor a
+  // re-export comparison can catch it — only an explicit shape check.
+  if (input.length !== 88 || input[0] !== 0x30 || input[23] !== 0x04) {
+    throw new TypeError(
+      `publicKeyBytes must be the canonical 88-byte uncompressed DER ` +
+        `SubjectPublicKeyInfo (point marker 0x04), got ${input.length} ` +
+        `byte(s)${input.length > 23 ? ` with marker 0x${input[23].toString(16)}` : ''}`,
+    );
+  }
+  let key: KeyObject;
   try {
-    namedCurve = createPublicKey({
-      key: Buffer.from(bytes),
-      format: 'der',
-      type: 'spki',
-    }).asymmetricKeyDetails?.namedCurve;
+    key = createPublicKey({ key: input, format: 'der', type: 'spki' });
   } catch (err) {
     throw new TypeError(
       `publicKeyBytes (${bytes.length} bytes) is not a parseable DER ` +
         `SubjectPublicKeyInfo: ${(err as Error).message}`,
     );
   }
-  if (namedCurve !== 'secp256k1') {
+  if (key.asymmetricKeyDetails?.namedCurve !== 'secp256k1') {
     throw new TypeError(
       `publicKeyBytes must be a secp256k1 public key, got ` +
-        `${namedCurve ?? 'a non-EC key'}`,
+        `${key.asymmetricKeyDetails?.namedCurve ?? 'a non-EC key'}`,
     );
   }
+  // Parseable + right curve is still not the CONTRACT: tag 8 is the
+  // canonical 88-byte UNCOMPRESSED SPKI. A compressed point (0x02/0x03,
+  // 56 bytes) parses fine and names the same curve, yet is not the form
+  // the field documents or that verifiers expect. Re-exporting and
+  // comparing enforces the canonical encoding in one step.
+  const canonical = key.export({ type: 'spki', format: 'der' });
+  if (!canonical.equals(input)) {
+    throw new TypeError(
+      `publicKeyBytes must be the canonical 88-byte uncompressed DER ` +
+        `SubjectPublicKeyInfo; got a ${bytes.length}-byte non-canonical ` +
+        `encoding (compressed point?)`,
+    );
+  }
+  return key;
 }
 
 /**
@@ -240,7 +287,30 @@ export function buildPhase2Qr(fields: Phase2Fields): string {
         `(SEQUENCE of two INTEGERs), got ${signature.length} bytes`,
     );
   }
-  assertSecp256k1Spki(fields.publicKeyBytes);
+  const key = parseTag8Key(fields.publicKeyBytes);
+  // THE check that makes tags 6-8 a proof instead of three unrelated
+  // blobs: the signature must actually verify over the invoice hash
+  // under this key. Individually-valid fields from different invoices
+  // or different terminals produce a QR that every offline verifier
+  // rejects — and nothing else in the pipeline catches it.
+  if (!createVerify('sha256').update(hash).verify(key, signature)) {
+    throw new TypeError(
+      'signatureBase64 does not verify over invoiceHashBase64 with ' +
+        'publicKeyBytes — tags 6, 7 and 8 belong to different invoices ' +
+        'or different keys',
+    );
+  }
+  if (fields.certificateSignature !== undefined) {
+    // Tag 9 is the CA's DER ECDSA signature over the CSID certificate.
+    // It cannot be verified without the issuer's key, but a malformed
+    // DER value (`30 00` and friends) is detectable and never valid.
+    if (!isDerEcdsaSignature(Buffer.from(fields.certificateSignature))) {
+      throw new TypeError(
+        `certificateSignature must be a DER ECDSA signature (tag 9), got ` +
+          `${fields.certificateSignature.length} bytes`,
+      );
+    }
+  }
   return encodeQr([
     ...phase1Tlvs(fields),
     tlv(6, utf8(fields.invoiceHashBase64)),

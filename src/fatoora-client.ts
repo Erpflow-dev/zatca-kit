@@ -20,8 +20,99 @@ interface ValidationResultsBody {
  */
 function contradictsSuccess(vr?: ValidationResultsBody): boolean {
   if (vr == null) return false;
-  const errors = [...(vr.errorMessages ?? []), ...(vr.erroMessages ?? [])];
-  return String(vr.status ?? '').toUpperCase() === 'ERROR' || errors.length > 0;
+  if (String(vr.status ?? '').toUpperCase() === 'ERROR') return true;
+  for (const field of [vr.errorMessages, vr.erroMessages]) {
+    if (field == null) continue;
+    // A non-array here is a body we do not understand. Spreading it
+    // would throw ("not iterable") and take the whole call down; the
+    // safe reading of an unparseable result is "not proven successful".
+    if (!Array.isArray(field)) return true;
+    if (field.length > 0) return true;
+  }
+  return false;
+}
+
+/** UBL 2.1 namespace per document root — the exact URI, not a prefix. */
+const UBL_NAMESPACES: Record<string, string> = {
+  Invoice: 'urn:oasis:names:specification:ubl:schema:xsd:Invoice-2',
+  CreditNote: 'urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2',
+  DebitNote: 'urn:oasis:names:specification:ubl:schema:xsd:DebitNote-2',
+};
+
+/**
+ * Minimal well-formedness scan: walks the document matching every open
+ * tag to its close, and returns the ROOT element's name and attributes —
+ * or null if the text is not a single well-formed element tree.
+ * Truncated documents (the common corruption) leave the stack non-empty
+ * and are rejected. Dependency-free by design: the kit ships no parser.
+ */
+function scanXmlRoot(text: string): { name: string; attrs: string } | null {
+  const stack: string[] = [];
+  let root: { name: string; attrs: string } | null = null;
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== '<') {
+      const next = text.indexOf('<', i);
+      const chunk = text.slice(i, next === -1 ? text.length : next);
+      // Character data outside the root element is not well-formed.
+      if (stack.length === 0 && chunk.trim() !== '') return null;
+      if (next === -1) break;
+      i = next;
+      continue;
+    }
+    if (text.startsWith('<!--', i)) {
+      const end = text.indexOf('-->', i);
+      if (end === -1) return null;
+      i = end + 3;
+      continue;
+    }
+    if (text.startsWith('<![CDATA[', i)) {
+      const end = text.indexOf(']]>', i);
+      if (end === -1) return null;
+      i = end + 3;
+      continue;
+    }
+    if (text.startsWith('<?', i)) {
+      const end = text.indexOf('?>', i);
+      if (end === -1) return null;
+      i = end + 2;
+      continue;
+    }
+    if (text.startsWith('<!', i)) return null; // DOCTYPE: never in a CSID reply
+    if (text.startsWith('</', i)) {
+      const end = text.indexOf('>', i);
+      if (end === -1) return null;
+      if (stack.pop() !== text.slice(i + 2, end).trim()) return null;
+      i = end + 1;
+      continue;
+    }
+    // Open tag: find the '>' that is not inside an attribute value.
+    let j = i + 1;
+    let quote = '';
+    for (; j < text.length; j += 1) {
+      const c = text[j];
+      if (quote) {
+        if (c === quote) quote = '';
+      } else if (c === '"' || c === "'") {
+        quote = c;
+      } else if (c === '>') {
+        break;
+      }
+    }
+    if (j >= text.length) return null;
+    const inner = text.slice(i + 1, j);
+    const selfClosing = inner.endsWith('/');
+    const parsed = /^([A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)([\s\S]*)$/.exec(
+      selfClosing ? inner.slice(0, -1) : inner,
+    );
+    if (parsed === null) return null;
+    const [, name, attrs] = parsed;
+    if (stack.length === 0 && root !== null) return null; // a second root
+    if (root === null) root = { name, attrs };
+    if (!selfClosing) stack.push(name);
+    i = j + 1;
+  }
+  return stack.length === 0 ? root : null;
 }
 
 export interface FatooraCredentials {
@@ -473,27 +564,28 @@ export class FatooraClient {
     try {
       text = decodeBase64Strict(value, 'clearedInvoice')
         .toString('utf8')
-        .replace(/^﻿/, '')
-        .trimStart();
+        .replace(/^﻿/, '');
     } catch {
       return false;
     }
-    // Skip an XML declaration plus any leading comments / processing
-    // instructions so the root element is what we actually inspect.
-    let body = text;
-    for (;;) {
-      const isComment = body.startsWith('<!--');
-      if (!isComment && !body.startsWith('<?')) break;
-      const close = body.indexOf(isComment ? '-->' : '?>');
-      if (close === -1) return false;
-      body = body.slice(close + (isComment ? 3 : 2)).trimStart();
-    }
-    const root = /^<(?:[A-Za-z_][\w.-]*:)?([A-Za-z_][\w.-]*)[\s/>]/.exec(body);
+    // Well-formed as a whole — a truncated document (tags left open) is
+    // the corruption that a root-name regex cannot see.
+    const root = scanXmlRoot(text);
     if (root === null) return false;
-    if (!['Invoice', 'CreditNote', 'DebitNote'].includes(root[1])) return false;
-    return body.includes(
-      'urn:oasis:names:specification:ubl:schema:xsd:',
-    );
+
+    const colon = root.name.indexOf(':');
+    const prefix = colon === -1 ? '' : root.name.slice(0, colon);
+    const localName = colon === -1 ? root.name : root.name.slice(colon + 1);
+    const expectedNs = UBL_NAMESPACES[localName];
+    if (expectedNs === undefined) return false;
+
+    // The root must be IN that namespace — a substring match anywhere in
+    // the document would accept `…:xsd:Order-2` or a namespace that only
+    // appears on some unrelated child element.
+    const declaration = new RegExp(
+      `(?:^|\\s)xmlns${prefix === '' ? '' : ':' + prefix}\\s*=\\s*("|')([^"']*)\\1`,
+    ).exec(root.attrs);
+    return declaration !== null && declaration[2] === expectedNs;
   }
 
   private tryJson<T>(body: string): T | null {

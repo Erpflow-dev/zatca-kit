@@ -30,8 +30,15 @@ export interface CsrConfig {
   organizationIdentifier: string;
   organizationUnitName: string;
   organizationName: string;
-  /** ISO2, 'SA' for us. */
+  /** ISO 3166-1 alpha-2, 'SA' for us. */
   countryName: string;
+  /**
+   * Set when this EGS belongs to a VAT GROUP member. ZATCA then requires
+   * `organizationUnitName` to be that member's own 10-digit TIN. The
+   * 15-digit VAT number does not reveal group membership, so only the
+   * caller can say.
+   */
+  vatGroup?: boolean;
   /**
    * Functionality map over 'TSCZ', 1 = supported: '0100' = simplified-only
    * B2C till, '1100' = standard + simplified. Cannot be all zeros.
@@ -122,6 +129,26 @@ function rdn(typeOid: string, value: Buffer): Buffer {
 
 // ---- validation ------------------------------------------------------------
 
+/**
+ * ISO 3166-1 alpha-2, current codes (plus the officially reserved 'XK'
+ * for Kosovo, which several registries accept). Checking the SHAPE only
+ * lets 'ZZ' — a code that exists nowhere — into a certificate request
+ * that cannot be corrected after issuance.
+ */
+const ISO_3166_ALPHA2 = new Set(
+  ('AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH ' +
+    'BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL ' +
+    'CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET ' +
+    'FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU ' +
+    'GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE ' +
+    'KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC ' +
+    'MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC ' +
+    'NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT ' +
+    'PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR ' +
+    'SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA ' +
+    'UG UM US UY UZ VA VC VE VG VI VN VU WF WS XK YE YT ZA ZM ZW').split(' '),
+);
+
 export function validateCsrConfig(config: CsrConfig): void {
   const required: Array<keyof CsrConfig> = [
     'commonName',
@@ -162,8 +189,24 @@ export function validateCsrConfig(config: CsrConfig): void {
       "invoiceType must be '1000' (standard), '0100' (simplified) or '1100' (both) — last two digits are reserved zeros",
     );
   }
-  if (!/^[A-Z]{2}$/.test(config.countryName)) {
-    throw new CsrConfigError('countryName must be an ISO2 code like SA');
+  if (!ISO_3166_ALPHA2.has(config.countryName)) {
+    throw new CsrConfigError(
+      `countryName must be a real ISO 3166-1 alpha-2 code like SA, got ` +
+        `'${config.countryName}'`,
+    );
+  }
+  // ZATCA rule for VAT GROUP members: the organizational unit must carry
+  // the group member's own 10-digit TIN, not a free-text branch name.
+  // Group membership is not derivable from the 15-digit VAT number, so
+  // the caller declares it — guessing would reject legitimate branches.
+  if (
+    config.vatGroup === true &&
+    !/^\d{10}$/.test(config.organizationUnitName)
+  ) {
+    throw new CsrConfigError(
+      'organizationUnitName must be the 10-digit TIN of the VAT-group ' +
+        `member when vatGroup is set, got '${config.organizationUnitName}'`,
+    );
   }
 }
 
